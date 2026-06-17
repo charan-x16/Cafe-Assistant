@@ -60,7 +60,7 @@ async def test_seed_menu_inserts_data() -> None:
 
         assert inserted is True
         assert tenant_count == 1
-        assert item_count == 15
+        assert item_count == 16
         assert ingredient_count >= 20
         assert allergen_count == 6
         assert mapped_allergen_count > 0

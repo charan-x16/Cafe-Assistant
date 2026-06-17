@@ -176,7 +176,7 @@ async def test_load_menu_item_views_for_tenant_aggregates_seed_data() -> None:
             views = await load_menu_item_views_for_tenant(session, tenant_id)
 
         views_by_name = {view.name: view for view in views}
-        assert len(views) == 15
+        assert len(views) == 16
         assert AllergenCode.DAIRY in views_by_name["Cappuccino"].allergen_codes
         assert DietaryMode.GLUTEN_FREE in views_by_name["Cappuccino"].dietary_tags
         assert views_by_name["Turkey Pesto Panini"].allergen_data_complete is False

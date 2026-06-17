@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     environment: str = "local"
     database_url: str = "postgresql+asyncpg://cafe:cafe@localhost:5432/cafe_assistant"
     redis_url: str = "redis://localhost:6379/0"
+    embedding_provider: str = "hash"
+    embedding_dimension: int = 8
 
 
 @lru_cache

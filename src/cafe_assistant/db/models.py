@@ -6,6 +6,7 @@ from sqlalchemy import Boolean, Column, ForeignKey, Integer, Numeric, String, Ta
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from cafe_assistant.db.base import Base
+from cafe_assistant.db.types import EmbeddingVector
 
 item_ingredients = Table(
     "item_ingredients",
@@ -98,6 +99,7 @@ class MenuItem(Base):
     category: Mapped[str] = mapped_column(String(100), nullable=False)
     sugar_grams: Mapped[Decimal | None] = mapped_column(Numeric(6, 1), nullable=True)
     carbs_grams: Mapped[Decimal | None] = mapped_column(Numeric(6, 1), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(EmbeddingVector(8), nullable=True)
     is_available: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

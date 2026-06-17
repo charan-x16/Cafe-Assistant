@@ -11,8 +11,9 @@ from cafe_assistant.domain.dietary import AllergenCode, DietaryMode, MenuItemVie
 async def load_menu_item_views_for_tenant(
     session: AsyncSession,
     tenant_id: int,
+    item_ids: list[int] | None = None,
 ) -> list[MenuItemView]:
-    result = await session.scalars(
+    statement = (
         select(MenuItem)
         .where(MenuItem.tenant_id == tenant_id)
         .options(
@@ -20,6 +21,14 @@ async def load_menu_item_views_for_tenant(
             selectinload(MenuItem.dietary_tags),
         )
         .order_by(MenuItem.id)
+    )
+    if item_ids is not None:
+        if not item_ids:
+            return []
+        statement = statement.where(MenuItem.id.in_(item_ids))
+
+    result = await session.scalars(
+        statement
     )
 
     return [_to_menu_item_view(item) for item in result.unique()]
