@@ -71,7 +71,8 @@ async def _semantic_search_python(
     scored: list[tuple[int, float]] = []
     for item_id, embedding in result:
         score = cosine_similarity(query_embedding, embedding)
-        scored.append((item_id, score))
+        if score > 0:
+            scored.append((item_id, score))
 
     scored.sort(key=lambda item_score: (-item_score[1], item_score[0]))
     return [

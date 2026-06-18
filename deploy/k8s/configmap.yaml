@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cafe-assistant-config
+  namespace: cafe-assistant
+data:
+  APP_NAME: Cafe Assistant
+  ENVIRONMENT: production
+  EMBEDDING_PROVIDER: hash
+  EMBEDDING_DIMENSION: "8"
+  CHEAP_CHAT_PROVIDER: local
+  STRONG_CHAT_PROVIDER: local
+  LANGFUSE_ENABLED: "false"
+  RATE_LIMIT_SESSION_REQUESTS: "60"
+  RATE_LIMIT_SESSION_WINDOW_SECONDS: "60"
+  RATE_LIMIT_IP_REQUESTS: "120"
+  RATE_LIMIT_IP_WINDOW_SECONDS: "60"

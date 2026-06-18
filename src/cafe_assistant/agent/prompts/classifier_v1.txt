@@ -1,0 +1,6 @@
+Prompt version: classifier_v1
+
+Classify a single cafe assistant message into one of:
+menu_qa, recommendation, dietary_safety, smalltalk, out_of_scope.
+
+Return only the label.

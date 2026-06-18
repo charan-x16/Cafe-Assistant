@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cafe Assistant</title>
+    <style>
+      :root {
+        --ink: #20211d;
+        --paper: #fbf7ee;
+        --line: #c8bda8;
+        --accent: #1f7a68;
+        --accent-dark: #145345;
+        --warn: #8b3f26;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          linear-gradient(90deg, rgba(32, 33, 29, 0.05) 1px, transparent 1px),
+          linear-gradient(rgba(32, 33, 29, 0.05) 1px, transparent 1px),
+          var(--paper);
+        background-size: 28px 28px;
+        color: var(--ink);
+        font-family: Georgia, "Times New Roman", serif;
+      }
+
+      main {
+        width: min(920px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 32px 0;
+      }
+
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: end;
+        gap: 20px;
+        border-bottom: 2px solid var(--ink);
+        padding-bottom: 18px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2rem, 5vw, 4.8rem);
+        line-height: 0.9;
+        letter-spacing: 0;
+      }
+
+      .status {
+        font: 700 0.78rem/1.2 ui-monospace, "Cascadia Mono", monospace;
+        text-transform: uppercase;
+        color: var(--accent-dark);
+        border: 1px solid var(--line);
+        padding: 8px 10px;
+      }
+
+      .status-row {
+        display: grid;
+        justify-items: end;
+        gap: 8px;
+      }
+
+      .memory-actions {
+        display: none;
+        gap: 8px;
+      }
+
+      .memory-actions.visible {
+        display: flex;
+      }
+
+      .memory-actions button {
+        min-height: 32px;
+        padding: 0 10px;
+        background: transparent;
+        color: var(--accent-dark);
+        border: 1px solid var(--line);
+      }
+
+      .memory-actions button:hover {
+        color: white;
+        background: var(--accent-dark);
+      }
+
+      #messages {
+        display: grid;
+        gap: 14px;
+        min-height: 54vh;
+        align-content: end;
+        padding: 24px 0;
+      }
+
+      .message {
+        max-width: 76%;
+        border: 1px solid var(--line);
+        background: rgba(255, 252, 245, 0.86);
+        padding: 14px 16px;
+        line-height: 1.42;
+      }
+
+      .message.user {
+        justify-self: end;
+        background: #20352f;
+        color: #fffaf0;
+        border-color: #20352f;
+      }
+
+      .message.assistant {
+        justify-self: start;
+      }
+
+      form {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        border-top: 2px solid var(--ink);
+        padding-top: 16px;
+      }
+
+      .memory-panel {
+        display: none;
+        margin-bottom: 14px;
+        border: 1px solid var(--ink);
+        background: #fffdf7;
+        padding: 14px;
+      }
+
+      .memory-panel.visible {
+        display: grid;
+        gap: 12px;
+      }
+
+      .memory-panel p {
+        margin: 0;
+        line-height: 1.35;
+      }
+
+      .memory-panel .memory-fields {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+      }
+
+      .memory-panel .otp-fields {
+        display: none;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+      }
+
+      .memory-panel .otp-fields.visible {
+        display: grid;
+      }
+
+      .memory-panel .secondary {
+        background: transparent;
+        color: var(--warn);
+        border: 1px solid var(--line);
+      }
+
+      input {
+        width: 100%;
+        min-height: 48px;
+        border: 1px solid var(--line);
+        background: #fffdf7;
+        color: var(--ink);
+        padding: 0 14px;
+        font: 1rem/1.2 ui-sans-serif, Candara, "Trebuchet MS", sans-serif;
+      }
+
+      button {
+        min-height: 48px;
+        border: 0;
+        background: var(--accent);
+        color: white;
+        padding: 0 18px;
+        font: 800 0.82rem/1 ui-monospace, "Cascadia Mono", monospace;
+        text-transform: uppercase;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: var(--accent-dark);
+      }
+
+      button:disabled {
+        background: var(--line);
+        cursor: wait;
+      }
+
+      @media (max-width: 640px) {
+        header {
+          align-items: start;
+          flex-direction: column;
+        }
+
+        .status-row {
+          justify-items: start;
+        }
+
+        .message {
+          max-width: 92%;
+        }
+
+        form,
+        .memory-panel .memory-fields,
+        .memory-panel .otp-fields {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Cafe Assistant</h1>
+        <div class="status-row">
+          <div class="status">Safety filter on</div>
+          <div id="memory-actions" class="memory-actions">
+            <button id="view-profile-button" type="button">Profile</button>
+            <button id="forget-profile-button" type="button">Forget</button>
+          </div>
+        </div>
+      </header>
+      <section id="messages" aria-live="polite"></section>
+      <section id="memory-panel" class="memory-panel" aria-live="polite">
+        <p id="memory-copy">Remember my preferences for next visit?</p>
+        <div class="memory-fields">
+          <input id="phone-input" name="phone" autocomplete="tel" placeholder="Phone number" />
+          <button id="start-otp-button" type="button">Remember</button>
+        </div>
+        <div id="otp-fields" class="otp-fields">
+          <input id="otp-input" name="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="Code" />
+          <button id="confirm-otp-button" type="button">Confirm</button>
+        </div>
+        <button id="dismiss-memory-button" class="secondary" type="button">Not now</button>
+      </section>
+      <form id="chat-form">
+        <input id="message-input" name="message" autocomplete="off" placeholder="Ask about the menu" />
+        <button id="send-button" type="submit">Send</button>
+      </form>
+    </main>
+    <script>
+      const messages = document.querySelector("#messages");
+      const form = document.querySelector("#chat-form");
+      const input = document.querySelector("#message-input");
+      const button = document.querySelector("#send-button");
+      const memoryPanel = document.querySelector("#memory-panel");
+      const memoryCopy = document.querySelector("#memory-copy");
+      const memoryActions = document.querySelector("#memory-actions");
+      const phoneInput = document.querySelector("#phone-input");
+      const otpInput = document.querySelector("#otp-input");
+      const otpFields = document.querySelector("#otp-fields");
+      const startOtpButton = document.querySelector("#start-otp-button");
+      const confirmOtpButton = document.querySelector("#confirm-otp-button");
+      const dismissMemoryButton = document.querySelector("#dismiss-memory-button");
+      const viewProfileButton = document.querySelector("#view-profile-button");
+      const forgetProfileButton = document.querySelector("#forget-profile-button");
+      const sessionId = crypto.randomUUID();
+      const tenantId = 1;
+      let deviceToken = localStorage.getItem("cafeAssistantDeviceToken") || "";
+      let challengeId = "";
+      let completedAssistantTurns = 0;
+
+      updateMemoryActions();
+
+      function appendMessage(role, text = "") {
+        const node = document.createElement("div");
+        node.className = `message ${role}`;
+        node.textContent = text;
+        messages.appendChild(node);
+        node.scrollIntoView({ block: "end", behavior: "smooth" });
+        return node;
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+
+        appendMessage("user", text);
+        input.value = "";
+        button.disabled = true;
+        const assistantNode = appendMessage("assistant", "");
+
+        try {
+          const response = await fetch("/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              session_id: sessionId,
+              tenant_id: tenantId,
+              device_token: deviceToken || null,
+              message: text,
+            }),
+          });
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const events = buffer.split("\n\n");
+            buffer = events.pop() || "";
+            for (const eventText of events) {
+              const dataLine = eventText.split("\n").find((line) => line.startsWith("data: "));
+              if (!dataLine) continue;
+              const payload = JSON.parse(dataLine.slice(6));
+              if (payload.token) {
+                assistantNode.textContent += payload.token;
+              }
+            }
+          }
+        } catch {
+          assistantNode.textContent = "Sorry, I could not reach the cafe assistant.";
+        } finally {
+          completedAssistantTurns += 1;
+          maybeShowMemoryPrompt();
+          button.disabled = false;
+          input.focus();
+        }
+      });
+
+      startOtpButton.addEventListener("click", async () => {
+        const phone = phoneInput.value.trim();
+        if (!phone) return;
+        startOtpButton.disabled = true;
+        try {
+          const response = await fetch("/identity/otp/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tenant_id: tenantId, phone }),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.detail || "Could not start OTP.");
+          challengeId = payload.challenge_id;
+          otpFields.classList.add("visible");
+          memoryCopy.textContent = "Enter the code to remember preferences.";
+        } catch {
+          memoryCopy.textContent = "Could not start the remember flow.";
+        } finally {
+          startOtpButton.disabled = false;
+        }
+      });
+
+      confirmOtpButton.addEventListener("click", async () => {
+        const phone = phoneInput.value.trim();
+        const code = otpInput.value.trim();
+        if (!phone || !code || !challengeId) return;
+        confirmOtpButton.disabled = true;
+        try {
+          const response = await fetch("/identity/otp/confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              session_id: sessionId,
+              tenant_id: tenantId,
+              phone,
+              challenge_id: challengeId,
+              code,
+            }),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.detail || "Could not confirm OTP.");
+          deviceToken = payload.device_token;
+          localStorage.setItem("cafeAssistantDeviceToken", deviceToken);
+          memoryPanel.classList.remove("visible");
+          updateMemoryActions();
+        } catch {
+          memoryCopy.textContent = "Could not confirm the code.";
+        } finally {
+          confirmOtpButton.disabled = false;
+        }
+      });
+
+      dismissMemoryButton.addEventListener("click", () => {
+        memoryPanel.classList.remove("visible");
+      });
+
+      viewProfileButton.addEventListener("click", async () => {
+        if (!deviceToken) return;
+        const response = await fetch(
+          `/identity/profile?tenant_id=${tenantId}&device_token=${encodeURIComponent(deviceToken)}`,
+        );
+        if (!response.ok) return;
+        const profile = await response.json();
+        appendMessage("assistant", `Remembered profile: ${JSON.stringify(profile.preferences)}`);
+      });
+
+      forgetProfileButton.addEventListener("click", async () => {
+        if (!deviceToken) return;
+        await fetch(
+          `/identity/profile?tenant_id=${tenantId}&device_token=${encodeURIComponent(deviceToken)}`,
+          { method: "DELETE" },
+        );
+        localStorage.removeItem("cafeAssistantDeviceToken");
+        deviceToken = "";
+        updateMemoryActions();
+      });
+
+      function maybeShowMemoryPrompt() {
+        if (deviceToken || completedAssistantTurns < 1) return;
+        memoryPanel.classList.add("visible");
+      }
+
+      function updateMemoryActions() {
+        memoryActions.classList.toggle("visible", Boolean(deviceToken));
+      }
+    </script>
+  </body>
+</html>

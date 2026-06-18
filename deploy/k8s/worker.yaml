@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cafe-assistant-retention-cleanup
+  namespace: cafe-assistant
+spec:
+  schedule: "17 3 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: cafe-assistant-worker
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: retention-cleanup
+              image: cafe-assistant:stable
+              command: ["python", "scripts/cleanup_retention.py"]
+              envFrom:
+                - configMapRef:
+                    name: cafe-assistant-config
+                - secretRef:
+                    name: cafe-assistant-secrets
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi

@@ -1,0 +1,156 @@
+# Cafe Assistant Runbook
+
+## Service Summary
+
+The cafe assistant is a FastAPI backend with deterministic dietary/allergen
+safety filtering, hybrid menu retrieval, session memory, consent-gated durable
+profiles, audit logging, tracing, and automated safety evals.
+
+Production runtime components:
+
+- API: `cafe_assistant.main:app`
+- Worker: retention cleanup via `scripts/cleanup_retention.py`
+- Database: PostgreSQL 16 with pgvector
+- Cache/session/rate-limit store: Redis
+
+## How to Read a Trace
+
+Use the replay endpoint for in-process traces:
+
+```bash
+curl "$BASE_URL/observability/replay/$TRACE_ID"
+```
+
+Or from a shell in the same process context:
+
+```bash
+uv run python scripts/incident_replay.py "$TRACE_ID"
+```
+
+Look for:
+
+- `version_registry`: prompt, tool, retriever, model, policy, memory-rule, and
+  orchestrator versions active for the request.
+- `prompt_context`: sanitized model messages and prompt version.
+- `retrieved_items`: candidate item ids returned by retrieval/tool spans.
+- `tools`: `menu_lookup`, `search_menu`, and `dietary_filter` spans.
+- `spans`: duration, errors, and attributes for each request step.
+
+For a safety incident, confirm that the LLM context contains only `SAFE_ITEM`
+lines and that unsafe/allergen-incomplete items were excluded before composing.
+
+## Incident Replay
+
+1. Find `trace_id` from the response headers, audit event, or logs.
+2. Run:
+
+```bash
+uv run python scripts/incident_replay.py "$TRACE_ID"
+```
+
+3. Capture:
+   - request id and tenant id
+   - version registry
+   - retrieved item ids
+   - safe item ids
+   - prompt version and sanitized prompt context
+   - any failed tool or model spans
+4. Re-run the eval gate locally:
+
+```bash
+uv run python evals/run_evals.py
+```
+
+5. If allergen false negatives are nonzero, freeze rollout and roll back.
+
+## Rollback
+
+Kubernetes one-command rollback:
+
+```bash
+deploy/rollback.sh
+```
+
+This runs `kubectl rollout undo` for the stable API deployment, waits for rollout
+health, and scales canary to zero.
+
+For production Compose:
+
+```bash
+CAFE_ASSISTANT_IMAGE="$LAST_KNOWN_GOOD_IMAGE" docker compose -f deploy/docker-compose.prod.yml up -d
+```
+
+Always verify after rollback:
+
+```bash
+curl "$BASE_URL/health"
+uv run python evals/allergen_safety.py
+```
+
+## Canary and Shadow Traffic
+
+Start canary:
+
+```bash
+IMAGE="$NEW_IMAGE" CANARY_REPLICAS=1 deploy/release.sh
+```
+
+Run shadow traffic:
+
+```bash
+TARGET_URL="$CANARY_URL" TENANT_ID=1 uv run python deploy/shadow_traffic.py
+```
+
+Promote:
+
+```bash
+IMAGE="$NEW_IMAGE" deploy/promote.sh
+```
+
+Abort:
+
+```bash
+deploy/rollback.sh
+```
+
+## Who to Page
+
+- Safety/allergen incident: on-call backend owner and product safety owner.
+- Database outage or migration issue: backend owner and platform/database owner.
+- Redis/rate-limit/session outage: platform owner; backend owner verifies
+  anonymous fallback.
+- LLM/provider degradation: backend owner; assistant should continue using safe
+  fallback behavior or local provider fallback.
+
+## Safe Degradation Expectations
+
+- Recommender failure: return safety-filtered popular/menu items, never raw menu
+  items.
+- Allergen data unavailable or incomplete with active allergen avoidance: say the
+  assistant cannot confirm a safe option and ask the customer to check with staff.
+- Memory unavailable: continue as a functional anonymous session.
+- Medical questions: refuse with the not-medical-advice note.
+
+## Launch Gate Checklist
+
+- Migrations render: `uv run alembic upgrade head --sql`
+  Acceptance: command exits zero and includes all revisions through head.
+- Unit/integration/chaos/load tests: `uv run pytest -q`
+  Acceptance: all tests pass; p95 first-token latency below 2 seconds and p99
+  below 2.5 seconds in the CI load smoke.
+- Lint: `uv run ruff check . --no-cache`
+  Acceptance: exits zero.
+- Safety evals: `uv run python evals/run_evals.py`
+  Acceptance: allergen false-negative count is exactly zero; other families pass.
+- Standalone hard gate: `uv run python evals/allergen_safety.py`
+  Acceptance: exits zero with `false_negative_count=0`.
+- Compose validation: `docker compose config` and
+  `docker compose -f deploy/docker-compose.prod.yml config`
+  Acceptance: both render valid config.
+- Canary release: `IMAGE=$NEW_IMAGE deploy/release.sh`
+  Acceptance: canary rollout reaches ready state and shadow traffic passes.
+- Rollback drill: `deploy/rollback.sh`
+  Acceptance: stable deployment returns to last known good image and health checks
+  pass.
+- Observability: `GET /metrics` and `GET /observability/replay/{trace_id}`
+  Acceptance: metrics families are present and traces include the version registry.

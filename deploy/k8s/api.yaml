@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cafe-assistant-api-stable
+  namespace: cafe-assistant
+  labels:
+    app: cafe-assistant-api
+    track: stable
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cafe-assistant-api
+      track: stable
+  template:
+    metadata:
+      labels:
+        app: cafe-assistant-api
+        track: stable
+    spec:
+      containers:
+        - name: api
+          image: cafe-assistant:stable
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: cafe-assistant-config
+            - secretRef:
+                name: cafe-assistant-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cafe-assistant-api-canary
+  namespace: cafe-assistant
+  labels:
+    app: cafe-assistant-api
+    track: canary
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: cafe-assistant-api
+      track: canary
+  template:
+    metadata:
+      labels:
+        app: cafe-assistant-api
+        track: canary
+    spec:
+      containers:
+        - name: api
+          image: cafe-assistant:canary
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: cafe-assistant-config
+            - secretRef:
+                name: cafe-assistant-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cafe-assistant-api
+  namespace: cafe-assistant
+spec:
+  selector:
+    app: cafe-assistant-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
