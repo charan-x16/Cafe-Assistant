@@ -1,3 +1,11 @@
+"""Message classification router for the cafe assistant state machine.
+
+Routing is intentionally simple and conservative. Deterministic rules handle
+clear menu, safety, smalltalk, and out-of-scope messages first. Model-based
+classification is used only when rules are low-confidence, and untrusted user
+text is wrapped before it reaches a model.
+"""
+
 from __future__ import annotations
 
 import re
@@ -10,6 +18,8 @@ from cafe_assistant.security.injection import wrap_untrusted_text
 
 
 class Intent(StrEnum):
+    """Supported high-level routes for one user message."""
+
     MENU_QA = "menu_qa"
     RECOMMENDATION = "recommendation"
     DIETARY_SAFETY = "dietary_safety"
@@ -19,6 +29,8 @@ class Intent(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ClassificationResult:
+    """Router decision and confidence score."""
+
     intent: Intent
     confidence: float
 
@@ -40,11 +52,37 @@ _OUT_OF_SCOPE_PATTERN = re.compile(
 
 
 class MessageRouter:
+    """Classify messages before retrieval and composition."""
+
     def __init__(self, cheap_model: ChatProvider, strong_model: ChatProvider) -> None:
+        """Create a router with cheap and strong model fallbacks.
+
+        Args:
+            cheap_model (ChatProvider):
+                Low-cost provider used first when rules are low-confidence.
+            strong_model (ChatProvider):
+                Stronger provider used only when cheap classification is unclear.
+
+        Returns:
+            None:
+                The router stores the providers for future classification calls.
+        """
         self.cheap_model = cheap_model
         self.strong_model = strong_model
 
     async def classify(self, message: str) -> ClassificationResult:
+        """Classify a user message into one agent route.
+
+        Args:
+            message (str):
+                Current user message. It is treated as untrusted when sent to a
+                model classifier.
+
+        Returns:
+            ClassificationResult:
+                Intent and confidence selected by rules, cheap model, or strong
+                model in that order.
+        """
         with span("router.classify", route="unknown", confidence=0.0) as record:
             rules_result = self._classify_with_rules(message)
             result = rules_result
@@ -69,6 +107,17 @@ class MessageRouter:
             return result
 
     def _classify_with_rules(self, message: str) -> ClassificationResult:
+        """Classify clear messages with deterministic keyword rules.
+
+        Args:
+            message (str):
+                Current user message.
+
+        Returns:
+            ClassificationResult:
+                Rule-based route. Low-confidence default goes to menu QA so the
+                model cascade can disambiguate before orchestration continues.
+        """
         if _OUT_OF_SCOPE_PATTERN.search(message):
             return ClassificationResult(Intent.OUT_OF_SCOPE, 0.85)
         if _SAFETY_PATTERN.search(message):
@@ -88,6 +137,20 @@ class MessageRouter:
         provider: ChatProvider,
         message: str,
     ) -> ClassificationResult | None:
+        """Ask one chat provider to classify a low-confidence message.
+
+        Args:
+            provider (ChatProvider):
+                Chat provider used for this classifier attempt.
+            message (str):
+                Current user message, wrapped as untrusted data in the prompt.
+
+        Returns:
+            ClassificationResult | None:
+                Parsed route with conservative confidence when the provider emits
+                a supported intent string, otherwise None so the caller can fall
+                back to the next classifier or rule result.
+        """
         prompt = (
             "Classify this cafe-assistant message as one of "
             "menu_qa, recommendation, dietary_safety, smalltalk, out_of_scope. "
