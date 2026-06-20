@@ -1,5 +1,9 @@
-"""Implementation module for policy.
-Contains typed helpers used by the cafe assistant backend runtime.
+"""Hybrid retrieval for tenant-scoped policy document chunks.
+
+Policy retrieval is separate from menu retrieval. It searches policy chunks from
+company documents so the agent can answer operational questions, but those chunks
+are never treated as menu recommendations. Like menu retrieval, Qdrant is only an
+index: returned IDs are resolved back to SQL before text enters any model context.
 """
 
 from __future__ import annotations
@@ -14,8 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from cafe_assistant.db.models import PolicyChunk, PolicyChunkEmbedding, PolicyDocument
 from cafe_assistant.gateway.model_gateway import EmbeddingProvider, get_embedding_provider
+from cafe_assistant.observability.metrics import record_quality_event
 from cafe_assistant.retrieval.embeddings import embed_query
-from cafe_assistant.retrieval.qdrant_store import qdrant_enabled, search_policy_chunk_vectors
+from cafe_assistant.retrieval.qdrant_store import (
+    QdrantVectorStoreError,
+    qdrant_enabled,
+    search_policy_chunk_vectors,
+)
 from cafe_assistant.retrieval.vector_store import cosine_similarity
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
@@ -24,7 +33,13 @@ _RRF_K = 60
 
 @dataclass(frozen=True, slots=True)
 class PolicyChunkResult:
-    """Container for policy chunk result behavior and data."""
+    """Authoritative policy chunk returned by policy retrieval.
+
+    The result contains SQL-loaded text and ranking metadata. It is safe for
+    grounded policy answering, but it is not a menu item and must not be passed
+    into recommendation-only contexts.
+    """
+
     id: int
     heading_path: str
     content: str
@@ -39,23 +54,26 @@ async def search_policy_chunks(
     k: int = 5,
     embedding_provider: EmbeddingProvider | None = None,
 ) -> list[PolicyChunkResult]:
-    """Retrieve policy chunks with fused keyword and semantic ranking.
+    """Retrieve policy chunks with keyword/semantic rank fusion.
 
     Args:
         session (AsyncSession):
-            Async SQLAlchemy session used for tenant-scoped database reads and writes.
+            Async SQLAlchemy session used to search and reload policy chunks.
         tenant_id (int):
-            Tenant identifier used to scope database and vector-store operations.
+            Tenant ID used to scope every keyword, vector, and SQL reload query.
         query (str):
-            User search text or policy question to retrieve against.
+            User policy question or search text.
         k (int):
-            Maximum number of ranked candidates or results to return.
+            Maximum number of final policy chunks to return.
         embedding_provider (EmbeddingProvider | None):
-            Embedding provider used to create query or record vectors.
+            Optional embedding provider override used by tests. When omitted, the
+            configured provider from the model gateway is used.
 
     Returns:
         list[PolicyChunkResult]:
-            Ranked policy chunks with authoritative text loaded from SQL.
+            Ranked policy chunks loaded from SQL with heading path, content,
+            fused score, and one-based rank. Empty input or no matches returns an
+            empty list.
     """
     if k <= 0 or not query.strip():
         return []
@@ -107,21 +125,22 @@ async def _policy_keyword_search(
     query: str,
     k: int,
 ) -> list[tuple[int, float]]:
-    """Handle policy keyword search.
+    """Find policy chunks using deterministic token and fuzzy text matching.
 
     Args:
         session (AsyncSession):
-            Async SQLAlchemy session used for tenant-scoped database reads and writes.
+            Async SQLAlchemy session used to load tenant policy chunks.
         tenant_id (int):
-            Tenant identifier used to scope database and vector-store operations.
+            Tenant ID joined through `policy_documents`.
         query (str):
-            User search text or policy question to retrieve against.
+            User policy question or search text.
         k (int):
-            Maximum number of ranked candidates or results to return.
+            Maximum number of keyword candidates to return.
 
     Returns:
         list[tuple[int, float]]:
-            Value produced for the caller according to the function contract.
+            Policy chunk IDs paired with deterministic keyword scores, sorted by
+            descending score and then ascending chunk ID.
     """
     chunks = await session.scalars(
         select(PolicyChunk)
@@ -145,30 +164,41 @@ async def _policy_semantic_search(
     query_embedding: list[float],
     k: int,
 ) -> list[tuple[int, float]]:
-    """Handle policy semantic search.
+    """Search policy embeddings with Qdrant, pgvector, or Python fallback.
 
     Args:
         session (AsyncSession):
-            Async SQLAlchemy session used for tenant-scoped database reads and writes.
+            Async SQLAlchemy session used for SQL/pgvector fallback reads.
         tenant_id (int):
-            Tenant identifier used to scope database and vector-store operations.
+            Tenant ID applied to Qdrant filters and SQL joins.
         query_embedding (list[float]):
-            Embedding vector produced from the user query.
+            Query vector produced by the configured embedding provider/model.
         k (int):
-            Maximum number of ranked candidates or results to return.
+            Maximum number of semantic policy candidates to return.
 
     Returns:
         list[tuple[int, float]]:
-            Value produced for the caller according to the function contract.
+            Policy chunk IDs paired with semantic similarity scores. If Qdrant is
+            configured but unavailable, the function records fallback metrics and
+            uses the SQL/pgvector path instead of failing the request.
     """
     bind = session.get_bind()
-    if bind.dialect.name == "postgresql" and qdrant_enabled():
-        try:
-            return await search_policy_chunk_vectors(tenant_id, query_embedding, k)
-        except RuntimeError:
-            return []
-
     if bind.dialect.name == "postgresql":
+        if qdrant_enabled():
+            try:
+                qdrant_hits = await search_policy_chunk_vectors(tenant_id, query_embedding, k)
+                if qdrant_hits:
+                    return qdrant_hits
+            except QdrantVectorStoreError:
+                record_quality_event(
+                    "retrieval_qdrant_failures_total",
+                    source_kind="policy_chunk",
+                )
+                record_quality_event(
+                    "retrieval_semantic_fallback_total",
+                    source_kind="policy_chunk",
+                    fallback="pgvector",
+                )
         return await _policy_semantic_search_postgres(session, tenant_id, query_embedding, k)
     return await _policy_semantic_search_python(session, tenant_id, query_embedding, k)
 
@@ -179,21 +209,22 @@ async def _policy_semantic_search_postgres(
     query_embedding: list[float],
     k: int,
 ) -> list[tuple[int, float]]:
-    """Handle policy semantic search postgres.
+    """Search policy chunk embeddings stored in Postgres pgvector.
 
     Args:
         session (AsyncSession):
-            Async SQLAlchemy session used for tenant-scoped database reads and writes.
+            Async SQLAlchemy session bound to Postgres.
         tenant_id (int):
-            Tenant identifier used to scope database and vector-store operations.
+            Tenant ID joined through `policy_documents`.
         query_embedding (list[float]):
-            Embedding vector produced from the user query.
+            Query vector serialized into pgvector literal format.
         k (int):
-            Maximum number of ranked candidates or results to return.
+            Maximum number of policy chunk hits to return.
 
     Returns:
         list[tuple[int, float]]:
-            Value produced for the caller according to the function contract.
+            Policy chunk IDs and pgvector similarity scores ordered by vector
+            distance and chunk ID.
     """
     vector_literal = "[" + ",".join(str(float(component)) for component in query_embedding) + "]"
     result = await session.execute(
@@ -230,21 +261,22 @@ async def _policy_semantic_search_python(
     query_embedding: list[float],
     k: int,
 ) -> list[tuple[int, float]]:
-    """Handle policy semantic search python.
+    """Search policy embeddings in Python for SQLite-based tests.
 
     Args:
         session (AsyncSession):
-            Async SQLAlchemy session used for tenant-scoped database reads and writes.
+            Async SQLAlchemy session bound to SQLite or another non-Postgres DB.
         tenant_id (int):
-            Tenant identifier used to scope database and vector-store operations.
+            Tenant ID joined through `policy_documents`.
         query_embedding (list[float]):
-            Embedding vector produced from the user query.
+            Query vector compared with stored Python lists.
         k (int):
-            Maximum number of ranked candidates or results to return.
+            Maximum number of policy chunk hits to return.
 
     Returns:
         list[tuple[int, float]]:
-            Value produced for the caller according to the function contract.
+            Policy chunk IDs and cosine-similarity scores ordered by descending
+            score and ascending chunk ID.
     """
     result = await session.execute(
         select(PolicyChunk.id, PolicyChunkEmbedding.embedding)
@@ -264,19 +296,20 @@ async def _policy_semantic_search_python(
 
 
 def _keyword_score(query: str, query_tokens: set[str], chunk: PolicyChunk) -> float:
-    """Handle keyword score.
+    """Score one policy chunk against a query using deterministic text signals.
 
     Args:
         query (str):
-            User search text or policy question to retrieve against.
+            Original user policy query.
         query_tokens (set[str]):
-            Query tokens value required to perform this operation.
+            Lowercased alphanumeric query tokens.
         chunk (PolicyChunk):
-            Chunk value required to perform this operation.
+            Policy chunk row whose heading path and content are scored.
 
     Returns:
         float:
-            Value produced for the caller according to the function contract.
+            Positive score when the query exactly, token-wise, or fuzzily matches
+            the chunk; zero when no useful keyword signal is found.
     """
     fields = f"{chunk.heading_path} {chunk.content}".lower()
     field_tokens = _tokens(fields)
@@ -298,14 +331,14 @@ def _keyword_score(query: str, query_tokens: set[str], chunk: PolicyChunk) -> fl
 
 
 def _tokens(text_value: str) -> set[str]:
-    """Handle tokens.
+    """Tokenize policy text into lowercased alphanumeric terms.
 
     Args:
         text_value (str):
-            Raw text being parsed, cleaned, hashed, or tokenized.
+            Raw query, heading, or policy content to tokenize.
 
     Returns:
         set[str]:
-            Value produced for the caller according to the function contract.
+            Unique lowercase tokens used by deterministic keyword scoring.
     """
     return set(_TOKEN_PATTERN.findall(text_value.lower()))
