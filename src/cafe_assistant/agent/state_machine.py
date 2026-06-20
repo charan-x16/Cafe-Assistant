@@ -1,3 +1,11 @@
+"""Explicit chat-agent state machine for safe menu recommendations.
+
+The state machine routes each request, carries session/profile restrictions,
+invokes deterministic menu tools, and passes only safety-filtered menu items to
+response composition. It enforces the rule that LLM synthesis never sees raw
+menu candidates or decides allergen/dietary safety.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -304,15 +312,13 @@ class ChatAgent:
         state_history.append(AgentState.RETRIEVING)
         tool_calls += 1
         self._ensure_tool_budget(tool_calls)
-        lookup_output = await self._safe_menu_lookup(request)
-        if extraction.restrictions.avoid_allergens and any(
-            not item.allergen_data_complete for item in lookup_output.items
-        ):
+        lookup_output = await self._safe_menu_lookup(request, extraction.restrictions)
+        if lookup_output.excluded_count > 0 and not lookup_output.items:
             response = (
-                "I can't confirm a safe option because allergen data for that menu item "
-                "is incomplete. Please check with cafe staff before ordering."
+                "I can't confirm a safe option for that request based on your restrictions. "
+                "Please check with cafe staff before ordering."
             )
-            record_quality_event("empty_safe_sets_total", reason="incomplete_allergen_data")
+            record_quality_event("empty_safe_sets_total", reason="lookup_excluded_all_matches")
             return _PreparedResponse(
                 response=response,
                 safe_items=[],
@@ -372,13 +378,30 @@ class ChatAgent:
             customer_id=customer_id,
         )
 
-    async def _safe_menu_lookup(self, request: ChatAgentRequest) -> MenuItemsOutput:
+    async def _safe_menu_lookup(
+        self,
+        request: ChatAgentRequest,
+        restrictions: CustomerRestrictions,
+    ) -> MenuItemsOutput:
+        """Run the exact lookup tool with active safety restrictions.
+
+        Args:
+            request (ChatAgentRequest):
+                Chat request containing tenant, session, and user message data.
+            restrictions (CustomerRestrictions):
+                Customer restrictions extracted for the current turn and session.
+
+        Returns:
+            MenuItemsOutput:
+                Safety-filtered lookup results, or an empty output if lookup fails.
+        """
         try:
             output = await self.tools.call(
                 "menu_lookup",
                 MenuLookupInput(
                     tenant_id=request.tenant_id,
                     query=request.message,
+                    restrictions=RestrictionsSchema.from_domain(restrictions),
                     limit=3,
                 ),
             )
@@ -418,10 +441,23 @@ class ChatAgent:
         request: ChatAgentRequest,
         restrictions: CustomerRestrictions,
     ) -> MenuItemsOutput:
+        """Load popular fallback items and keep the deterministic safety gate active.
+
+        Args:
+            request (ChatAgentRequest):
+                Chat request that supplies the tenant scope for fallback lookup.
+            restrictions (CustomerRestrictions):
+                Customer restrictions that must still be enforced during fallback.
+
+        Returns:
+            MenuItemsOutput:
+                Safety-filtered fallback items capped to the configured search size.
+        """
         all_items = await self.tools.menu_lookup(
             MenuLookupInput(
                 tenant_id=request.tenant_id,
                 query="",
+                restrictions=RestrictionsSchema.from_domain(restrictions),
                 limit=50,
             )
         )
