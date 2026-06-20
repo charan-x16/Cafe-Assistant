@@ -1,6 +1,9 @@
+"""Tests for legacy menu.
+Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""
+
 from __future__ import annotations
 
-import asyncio
 from decimal import Decimal
 from typing import TypedDict
 
@@ -8,10 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cafe_assistant.db.models import Allergen, DietaryTag, Ingredient, Location, MenuItem, Tenant
-from cafe_assistant.db.session import async_session_maker
 
 
 class MenuItemSeed(TypedDict):
+    """Container for menu item seed behavior and data."""
     name: str
     description: str
     price_cents: int
@@ -263,10 +266,30 @@ MENU_ITEMS: tuple[MenuItemSeed, ...] = (
 
 
 def to_decimal(value: str | None) -> Decimal | None:
+    """Convert fixture text into Decimal nutrition values.
+
+    Args:
+        value (str | None):
+            Value value required to perform this operation.
+
+    Returns:
+        Decimal | None:
+            Decimal nutrition value, or None when the source value is unknown.
+    """
     return Decimal(value) if value is not None else None
 
 
 async def seed_database(session: AsyncSession) -> bool:
+    """Insert the deterministic legacy menu fixture into a test database.
+
+    Args:
+        session (AsyncSession):
+            Async SQLAlchemy session used for tenant-scoped database reads and writes.
+
+    Returns:
+        bool:
+            True when fixture rows were inserted; false when they already existed.
+    """
     existing_tenant = await session.scalar(select(Tenant).where(Tenant.name == TENANT_NAME))
     if existing_tenant is not None:
         return False
@@ -307,15 +330,3 @@ async def seed_database(session: AsyncSession) -> bool:
     await session.commit()
     return True
 
-
-async def main() -> None:
-    async with async_session_maker() as session:
-        inserted = await seed_database(session)
-    if inserted:
-        print("Seeded cafe menu data.")
-    else:
-        print("Seed data already exists; no changes made.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

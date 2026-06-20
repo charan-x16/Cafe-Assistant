@@ -1,3 +1,7 @@
+"""Tests for security.
+Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -35,15 +39,38 @@ from cafe_assistant.main import create_app
 from cafe_assistant.memory.session import InMemorySessionMemory
 from cafe_assistant.security.rate_limit import InMemoryRateLimiter
 from cafe_assistant.security.redaction import configure_redacted_logging
-from scripts.embed_menu import backfill_menu_embeddings
-from scripts.seed_menu import TENANT_NAME, seed_database
+from tests.fixtures.legacy_embeddings import backfill_menu_embeddings
+from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
 
 
 class FakeEmbeddingProvider:
+    """Container for fake embedding provider behavior and data."""
+    dimensions = 384
+
     def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed the requested value.
+
+        Args:
+            texts (list[str]):
+                Input texts that should each receive one embedding vector.
+
+        Returns:
+            list[list[float]]:
+                Value produced for the caller according to the function contract.
+        """
         return [self._embed_one(text) for text in texts]
 
     def _embed_one(self, text: str) -> list[float]:
+        """Embed one.
+
+        Args:
+            text (str):
+                Input text to normalize, embed, tokenize, or classify.
+
+        Returns:
+            list[float]:
+                Value produced for the caller according to the function contract.
+        """
         tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
         vector = [
             self._feature(tokens, {"coffee", "espresso", "cappuccino", "latte", "mocha"}),
@@ -57,15 +84,50 @@ class FakeEmbeddingProvider:
         ]
         magnitude = math.sqrt(sum(component * component for component in vector))
         if magnitude == 0:
-            return vector
-        return [component / magnitude for component in vector]
+            return self._pad(vector)
+        return self._pad([component / magnitude for component in vector])
 
     def _feature(self, tokens: set[str], vocabulary: set[str]) -> float:
+        """Handle feature.
+
+        Args:
+            tokens (set[str]):
+                Tokens value required to perform this operation.
+            vocabulary (set[str]):
+                Vocabulary value required to perform this operation.
+
+        Returns:
+            float:
+                Value produced for the caller according to the function contract.
+        """
         return float(len(tokens & vocabulary))
+
+    def _pad(self, vector: list[float]) -> list[float]:
+        """Handle pad.
+
+        Args:
+            vector (list[float]):
+                Vector being normalized, converted, or sent to the vector store.
+
+        Returns:
+            list[float]:
+                Value produced for the caller according to the function contract.
+        """
+        return vector + [0.0] * (self.dimensions - len(vector))
 
 
 class CapturingChatProvider:
+    """Container for capturing chat provider behavior and data."""
     def __init__(self) -> None:
+        """Initialize the object with the dependencies or values required later.
+
+        Args:
+            None.
+
+        Returns:
+            None:
+                No value is returned; the function completes through side effects or validation.
+        """
         self.calls: list[list[ChatMessage]] = []
 
     async def stream_chat(
@@ -74,6 +136,18 @@ class CapturingChatProvider:
         *,
         timeout_seconds: float,
     ) -> AsyncIterator[str]:
+        """Handle stream chat.
+
+        Args:
+            messages (list[ChatMessage]):
+                Ordered chat messages sent to the configured chat provider.
+            timeout_seconds (float):
+                Maximum time allowed for the streaming chat request.
+
+        Returns:
+            AsyncIterator[str]:
+                Streamed values yielded to the caller as they become available.
+        """
         del timeout_seconds
         self.calls.append(messages)
         item_names = [
@@ -93,6 +167,15 @@ class CapturingChatProvider:
 
 @pytest.fixture
 async def security_session() -> AsyncIterator[tuple[AsyncSession, int, int]]:
+    """Handle security session.
+
+    Args:
+        None.
+
+    Returns:
+        AsyncIterator[tuple[AsyncSession, int, int]]:
+            Streamed values yielded to the caller as they become available.
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -114,6 +197,15 @@ async def security_session() -> AsyncIterator[tuple[AsyncSession, int, int]]:
 
 
 async def test_rate_limit_dependency_blocks_excess_requests() -> None:
+    """Verify that rate limit dependency blocks excess requests.
+
+    Args:
+        None.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     app = create_app()
     limiter = InMemoryRateLimiter(session_limit=1, session_window_seconds=60, ip_limit=100)
 
@@ -140,6 +232,16 @@ async def test_rate_limit_dependency_blocks_excess_requests() -> None:
 async def test_cross_tenant_profile_access_is_denied(
     security_session: tuple[AsyncSession, int, int],
 ) -> None:
+    """Verify that cross tenant profile access is denied.
+
+    Args:
+        security_session (tuple[AsyncSession, int, int]):
+            Security session value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     session, tenant_id, other_tenant_id = security_session
     token = await _create_profile(session, tenant_id)
     app = _app_with_session(session)
@@ -160,6 +262,16 @@ async def test_cross_tenant_profile_access_is_denied(
 async def test_prompt_injection_in_user_or_menu_content_is_neutralized(
     security_session: tuple[AsyncSession, int, int],
 ) -> None:
+    """Verify that prompt injection in user or menu content is neutralized.
+
+    Args:
+        security_session (tuple[AsyncSession, int, int]):
+            Security session value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     session, tenant_id, _other_tenant_id = security_session
     item = await session.scalar(select(MenuItem).where(MenuItem.name == "Cappuccino"))
     assert item is not None
@@ -193,6 +305,16 @@ async def test_prompt_injection_in_user_or_menu_content_is_neutralized(
 async def test_audit_events_are_written_and_redacted(
     security_session: tuple[AsyncSession, int, int],
 ) -> None:
+    """Verify that audit events are written and redacted.
+
+    Args:
+        security_session (tuple[AsyncSession, int, int]):
+            Security session value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     session, tenant_id, _other_tenant_id = security_session
     await backfill_menu_embeddings(session, provider=FakeEmbeddingProvider(), tenant_id=tenant_id)
     strong_model = CapturingChatProvider()
@@ -226,6 +348,16 @@ async def test_audit_events_are_written_and_redacted(
 async def test_profile_deletion_purges_customer_memory_rows(
     security_session: tuple[AsyncSession, int, int],
 ) -> None:
+    """Verify that profile deletion purges customer memory rows.
+
+    Args:
+        security_session (tuple[AsyncSession, int, int]):
+            Security session value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     session, tenant_id, _other_tenant_id = security_session
     token = await _create_profile(session, tenant_id)
     app = _app_with_session(session)
@@ -251,6 +383,16 @@ async def test_profile_deletion_purges_customer_memory_rows(
 
 
 def test_logs_redact_pii_and_health_data(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify that logs redact PII and health data.
+
+    Args:
+        caplog (pytest.LogCaptureFixture):
+            Caplog value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     configure_redacted_logging()
     logger = logging.getLogger("cafe_assistant.security_test")
 
@@ -264,10 +406,29 @@ def test_logs_redact_pii_and_health_data(caplog: pytest.LogCaptureFixture) -> No
 
 
 def _app_with_session(session: AsyncSession):
+    """Handle app with session.
+
+    Args:
+        session (AsyncSession):
+            Async SQLAlchemy session used for tenant-scoped database reads and writes.
+
+    Returns:
+        Iterator[Any]:
+            Streamed values yielded to the caller as they become available.
+    """
     app = create_app()
     limiter = InMemoryRateLimiter(session_limit=100, ip_limit=100)
 
     async def override_get_session() -> AsyncIterator[AsyncSession]:
+        """Handle override get session.
+
+        Args:
+            None.
+
+        Returns:
+            AsyncIterator[AsyncSession]:
+                Streamed values yielded to the caller as they become available.
+        """
         yield session
 
     app.dependency_overrides[get_session] = override_get_session
@@ -276,6 +437,18 @@ def _app_with_session(session: AsyncSession):
 
 
 async def _create_profile(session: AsyncSession, tenant_id: int) -> str:
+    """Create profile.
+
+    Args:
+        session (AsyncSession):
+            Async SQLAlchemy session used for tenant-scoped database reads and writes.
+        tenant_id (int):
+            Tenant identifier used to scope database and vector-store operations.
+
+    Returns:
+        str:
+            Value produced for the caller according to the function contract.
+    """
     customer = await get_or_create_customer_by_phone(
         session,
         tenant_id=tenant_id,
@@ -304,4 +477,16 @@ async def _create_profile(session: AsyncSession, tenant_id: int) -> str:
 
 
 def _chunks(text: str, chunk_size: int = 12) -> list[str]:
+    """Handle chunks.
+
+    Args:
+        text (str):
+            Input text to normalize, embed, tokenize, or classify.
+        chunk_size (int):
+            Chunk size value required to perform this operation.
+
+    Returns:
+        list[str]:
+            Value produced for the caller according to the function contract.
+    """
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]

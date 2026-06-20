@@ -1,15 +1,15 @@
-from __future__ import annotations
+"""Tests for legacy embeddings.
+Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""
 
-import argparse
-import asyncio
+from __future__ import annotations
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from cafe_assistant.db.models import Ingredient, MenuItem
-from cafe_assistant.db.session import async_session_maker
-from cafe_assistant.gateway.model_gateway import EmbeddingProvider, get_embedding_provider
+from cafe_assistant.gateway.model_gateway import EmbeddingProvider
 from cafe_assistant.retrieval.embeddings import build_menu_item_embedding_text
 
 
@@ -18,7 +18,23 @@ async def backfill_menu_embeddings(
     provider: EmbeddingProvider | None = None,
     tenant_id: int | None = None,
 ) -> int:
-    embedding_provider = provider or get_embedding_provider()
+    """Backfill menu embeddings.
+
+    Args:
+        session (AsyncSession):
+            Async SQLAlchemy session used for tenant-scoped database reads and writes.
+        provider (EmbeddingProvider | None):
+            Optional embedding provider override used by tests or scripts.
+        tenant_id (int | None):
+            Tenant identifier used to scope database and vector-store operations.
+
+    Returns:
+        int:
+            Value produced for the caller according to the function contract.
+    """
+    if provider is None:
+        raise ValueError('Test fixture requires an explicit embedding provider.')
+    embedding_provider = provider
     statement = (
         select(MenuItem)
         .where(MenuItem.is_available.is_(True))
@@ -47,16 +63,3 @@ async def backfill_menu_embeddings(
     await session.commit()
     return len(items)
 
-
-async def main() -> None:
-    parser = argparse.ArgumentParser(description="Backfill menu item embeddings.")
-    parser.add_argument("--tenant-id", type=int, default=None)
-    args = parser.parse_args()
-
-    async with async_session_maker() as session:
-        updated_count = await backfill_menu_embeddings(session, tenant_id=args.tenant_id)
-    print(f"Embedded {updated_count} menu items.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

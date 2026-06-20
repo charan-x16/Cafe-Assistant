@@ -1,3 +1,7 @@
+"""Evaluation helpers for deterministic quality and safety gates.
+Supports offline eval execution without external model calls.
+"""
+
 from __future__ import annotations
 
 import json
@@ -21,17 +25,40 @@ from cafe_assistant.db.base import Base
 from cafe_assistant.db.models import MenuItem, Tenant
 from cafe_assistant.gateway.model_gateway import ChatMessage, ChatModelCascade
 from cafe_assistant.memory.session import InMemorySessionMemory
-from scripts.embed_menu import backfill_menu_embeddings
-from scripts.seed_menu import TENANT_NAME, seed_database
+from tests.fixtures.legacy_embeddings import backfill_menu_embeddings
+from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
 
 DATASET_PATH = Path(__file__).parent / "datasets" / "agent_eval_cases.json"
 
 
 class FakeEmbeddingProvider:
+    """Container for fake embedding provider behavior and data."""
+    dimensions = 384
+
     def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed the requested value.
+
+        Args:
+            texts (list[str]):
+                Input texts that should each receive one embedding vector.
+
+        Returns:
+            list[list[float]]:
+                Value produced for the caller according to the function contract.
+        """
         return [self._embed_one(text) for text in texts]
 
     def _embed_one(self, text: str) -> list[float]:
+        """Embed one.
+
+        Args:
+            text (str):
+                Input text to normalize, embed, tokenize, or classify.
+
+        Returns:
+            list[float]:
+                Value produced for the caller according to the function contract.
+        """
         tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
         vector = [
             self._feature(tokens, {"coffee", "espresso", "cappuccino", "latte", "mocha"}),
@@ -45,15 +72,50 @@ class FakeEmbeddingProvider:
         ]
         magnitude = math.sqrt(sum(component * component for component in vector))
         if magnitude == 0:
-            return vector
-        return [component / magnitude for component in vector]
+            return self._pad(vector)
+        return self._pad([component / magnitude for component in vector])
 
     def _feature(self, tokens: set[str], vocabulary: set[str]) -> float:
+        """Handle feature.
+
+        Args:
+            tokens (set[str]):
+                Tokens value required to perform this operation.
+            vocabulary (set[str]):
+                Vocabulary value required to perform this operation.
+
+        Returns:
+            float:
+                Value produced for the caller according to the function contract.
+        """
         return float(len(tokens & vocabulary))
+
+    def _pad(self, vector: list[float]) -> list[float]:
+        """Handle pad.
+
+        Args:
+            vector (list[float]):
+                Vector being normalized, converted, or sent to the vector store.
+
+        Returns:
+            list[float]:
+                Value produced for the caller according to the function contract.
+        """
+        return vector + [0.0] * (self.dimensions - len(vector))
 
 
 class CapturingChatProvider:
+    """Container for capturing chat provider behavior and data."""
     def __init__(self) -> None:
+        """Initialize the object with the dependencies or values required later.
+
+        Args:
+            None.
+
+        Returns:
+            None:
+                No value is returned; the function completes through side effects or validation.
+        """
         self.calls: list[list[ChatMessage]] = []
 
     async def stream_chat(
@@ -62,6 +124,18 @@ class CapturingChatProvider:
         *,
         timeout_seconds: float,
     ) -> AsyncIterator[str]:
+        """Handle stream chat.
+
+        Args:
+            messages (list[ChatMessage]):
+                Ordered chat messages sent to the configured chat provider.
+            timeout_seconds (float):
+                Maximum time allowed for the streaming chat request.
+
+        Returns:
+            AsyncIterator[str]:
+                Streamed values yielded to the caller as they become available.
+        """
         del timeout_seconds
         self.calls.append(messages)
         item_names = [
@@ -81,6 +155,7 @@ class CapturingChatProvider:
 
 @dataclass(frozen=True, slots=True)
 class EvalCase:
+    """Container for eval case behavior and data."""
     id: str
     query: str
     unsafe_item_names: list[str]
@@ -91,6 +166,7 @@ class EvalCase:
 
 @dataclass(slots=True)
 class EvalRunResult:
+    """Container for eval run result behavior and data."""
     case: EvalCase
     result: ChatAgentResult
     latency_ms: float
@@ -99,10 +175,28 @@ class EvalRunResult:
 
     @property
     def recommended_names(self) -> set[str]:
+        """Handle recommended names.
+
+        Args:
+            None.
+
+        Returns:
+            set[str]:
+                Value produced for the caller according to the function contract.
+        """
         return {item.name for item in self.result.safe_items}
 
 
 async def run_eval_cases() -> list[EvalRunResult]:
+    """Run eval cases.
+
+    Args:
+        None.
+
+    Returns:
+        list[EvalRunResult]:
+            Value produced for the caller according to the function contract.
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -158,6 +252,15 @@ async def run_eval_cases() -> list[EvalRunResult]:
 
 
 def load_cases() -> list[EvalCase]:
+    """Load cases.
+
+    Args:
+        None.
+
+    Returns:
+        list[EvalCase]:
+            Loaded records or projected domain values matching the requested scope.
+    """
     payload = json.loads(DATASET_PATH.read_text(encoding="utf-8"))
     return [
         EvalCase(
@@ -173,8 +276,32 @@ def load_cases() -> list[EvalCase]:
 
 
 def parse_response_item_names(response: str, menu_names: set[str]) -> set[str]:
+    """Parse response item names.
+
+    Args:
+        response (str):
+            HTTP or chat response object being parsed or checked.
+        menu_names (set[str]):
+            Menu names value required to perform this operation.
+
+    Returns:
+        set[str]:
+            Parsed values extracted from the source text or structured payload.
+    """
     return {name for name in menu_names if name in response}
 
 
 def _chunks(text: str, chunk_size: int = 12) -> list[str]:
+    """Handle chunks.
+
+    Args:
+        text (str):
+            Input text to normalize, embed, tokenize, or classify.
+        chunk_size (int):
+            Chunk size value required to perform this operation.
+
+    Returns:
+        list[str]:
+            Value produced for the caller according to the function contract.
+    """
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]

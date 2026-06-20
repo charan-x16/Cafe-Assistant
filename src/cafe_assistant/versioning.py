@@ -1,3 +1,7 @@
+"""Implementation module for versioning.
+Contains typed helpers used by the cafe assistant backend runtime.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,12 +11,14 @@ from cafe_assistant.config import settings
 
 @dataclass(frozen=True, slots=True)
 class ComponentVersion:
+    """Container for component version behavior and data."""
     name: str
     version: str
 
 
 @dataclass(frozen=True, slots=True)
 class VersionRegistry:
+    """Container for version registry behavior and data."""
     prompts: dict[str, str]
     tools: dict[str, str]
     retrievers: dict[str, str]
@@ -23,6 +29,15 @@ class VersionRegistry:
     orchestrator_graph: ComponentVersion
 
     def as_trace_attributes(self) -> dict[str, object]:
+        """Handle as trace attributes.
+
+        Args:
+            None.
+
+        Returns:
+            dict[str, object]:
+                Value produced for the caller according to the function contract.
+        """
         return {
             "prompts": dict(self.prompts),
             "tools": dict(self.tools),
@@ -42,6 +57,15 @@ class VersionRegistry:
 
 
 def get_version_registry() -> VersionRegistry:
+    """Return version registry.
+
+    Args:
+        None.
+
+    Returns:
+        VersionRegistry:
+            Value produced for the caller according to the function contract.
+    """
     return VersionRegistry(
         prompts={
             "classifier": "classifier_v1",
@@ -54,14 +78,20 @@ def get_version_registry() -> VersionRegistry:
         },
         retrievers={
             "keyword": "postgres_fts_trigram_v1",
-            "semantic": "pgvector_cosine_v1",
+            "semantic": f"{settings.vector_provider}_cosine_v1",
+            "vector_collection": settings.qdrant_collection,
             "hybrid": "rrf_v1",
         },
         embedding_model=ComponentVersion(
-            name=settings.embedding_provider,
-            version=f"{settings.embedding_provider}_dim_{settings.embedding_dimension}_v1",
+            name=settings.embedding_model_name,
+            version=(
+                f"{settings.embedding_provider}:{settings.embedding_model_name}"
+                f"_dim_{settings.embedding_dimension}_v1"
+            ),
         ),
         model_choices={
+            "llm_provider": settings.llm_provider,
+            "llm_model": settings.llm_model,
             "cheap": settings.cheap_chat_provider,
             "strong": settings.strong_chat_provider,
             "default_chat_model": settings.default_chat_model_name,

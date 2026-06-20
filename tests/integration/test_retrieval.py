@@ -1,3 +1,7 @@
+"""Tests for retrieval.
+Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""
+
 from __future__ import annotations
 
 import math
@@ -13,17 +17,38 @@ from cafe_assistant.db.models import Tenant
 from cafe_assistant.domain.dietary import AllergenCode, CustomerRestrictions, DietaryMode
 from cafe_assistant.gateway.model_gateway import EmbeddingProvider
 from cafe_assistant.retrieval.hybrid import search_menu
-from scripts.embed_menu import backfill_menu_embeddings
-from scripts.seed_menu import TENANT_NAME, seed_database
+from tests.fixtures.legacy_embeddings import backfill_menu_embeddings
+from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
 
 
 class FakeEmbeddingProvider:
-    dimensions = 8
+    """Container for fake embedding provider behavior and data."""
+    dimensions = 384
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed the requested value.
+
+        Args:
+            texts (list[str]):
+                Input texts that should each receive one embedding vector.
+
+        Returns:
+            list[list[float]]:
+                Value produced for the caller according to the function contract.
+        """
         return [self._embed_one(text) for text in texts]
 
     def _embed_one(self, text: str) -> list[float]:
+        """Embed one.
+
+        Args:
+            text (str):
+                Input text to normalize, embed, tokenize, or classify.
+
+        Returns:
+            list[float]:
+                Value produced for the caller according to the function contract.
+        """
         tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
         vector = [
             self._feature(tokens, {"coffee", "espresso", "cappuccino", "latte", "mocha"}),
@@ -37,15 +62,49 @@ class FakeEmbeddingProvider:
         ]
         magnitude = math.sqrt(sum(component * component for component in vector))
         if magnitude == 0:
-            return vector
-        return [component / magnitude for component in vector]
+            return self._pad(vector)
+        return self._pad([component / magnitude for component in vector])
 
     def _feature(self, tokens: set[str], vocabulary: set[str]) -> float:
+        """Handle feature.
+
+        Args:
+            tokens (set[str]):
+                Tokens value required to perform this operation.
+            vocabulary (set[str]):
+                Vocabulary value required to perform this operation.
+
+        Returns:
+            float:
+                Value produced for the caller according to the function contract.
+        """
         return float(len(tokens & vocabulary))
+
+    def _pad(self, vector: list[float]) -> list[float]:
+        """Handle pad.
+
+        Args:
+            vector (list[float]):
+                Vector being normalized, converted, or sent to the vector store.
+
+        Returns:
+            list[float]:
+                Value produced for the caller according to the function contract.
+        """
+        return vector + [0.0] * (self.dimensions - len(vector))
 
 
 @pytest.fixture
 async def seeded_session() -> AsyncIterator[tuple[AsyncSession, int, EmbeddingProvider]]:
+    """Handle seeded session.
+
+    Args:
+        None.
+
+    Returns:
+        AsyncIterator[tuple[AsyncSession, int, EmbeddingProvider]]:
+            Streamed values yielded to the caller as they become available.
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -68,6 +127,16 @@ async def seeded_session() -> AsyncIterator[tuple[AsyncSession, int, EmbeddingPr
 async def test_exact_query_returns_matching_item(
     seeded_session: tuple[AsyncSession, int, EmbeddingProvider],
 ) -> None:
+    """Verify that exact query returns matching item.
+
+    Args:
+        seeded_session (tuple[AsyncSession, int, EmbeddingProvider]):
+            Seeded session value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     session, tenant_id, provider = seeded_session
 
     results = await search_menu(
@@ -85,6 +154,16 @@ async def test_exact_query_returns_matching_item(
 async def test_fuzzy_query_returns_plausible_items(
     seeded_session: tuple[AsyncSession, int, EmbeddingProvider],
 ) -> None:
+    """Verify that fuzzy query returns plausible items.
+
+    Args:
+        seeded_session (tuple[AsyncSession, int, EmbeddingProvider]):
+            Seeded session value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     session, tenant_id, provider = seeded_session
 
     results = await search_menu(
@@ -102,6 +181,16 @@ async def test_fuzzy_query_returns_plausible_items(
 async def test_unsafe_semantic_match_is_filtered_out(
     seeded_session: tuple[AsyncSession, int, EmbeddingProvider],
 ) -> None:
+    """Verify that unsafe semantic match is filtered out.
+
+    Args:
+        seeded_session (tuple[AsyncSession, int, EmbeddingProvider]):
+            Seeded session value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     session, tenant_id, provider = seeded_session
     restrictions = CustomerRestrictions(
         avoid_allergens={AllergenCode.PEANUT},
@@ -125,6 +214,16 @@ async def test_unsafe_semantic_match_is_filtered_out(
 async def test_search_menu_returns_only_post_filter_safe_items(
     seeded_session: tuple[AsyncSession, int, EmbeddingProvider],
 ) -> None:
+    """Verify that search menu returns only post filter safe items.
+
+    Args:
+        seeded_session (tuple[AsyncSession, int, EmbeddingProvider]):
+            Seeded session value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     session, tenant_id, provider = seeded_session
     restrictions = CustomerRestrictions(
         avoid_allergens={AllergenCode.DAIRY, AllergenCode.GLUTEN},
@@ -151,6 +250,16 @@ async def test_search_menu_returns_only_post_filter_safe_items(
 async def test_low_sugar_preference_reorders_safe_results(
     seeded_session: tuple[AsyncSession, int, EmbeddingProvider],
 ) -> None:
+    """Verify that low sugar preference reorders safe results.
+
+    Args:
+        seeded_session (tuple[AsyncSession, int, EmbeddingProvider]):
+            Seeded session value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     session, tenant_id, provider = seeded_session
     restrictions = CustomerRestrictions(
         avoid_allergens=set(),

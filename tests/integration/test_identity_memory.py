@@ -1,3 +1,7 @@
+"""Tests for identity memory.
+Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""
+
 from __future__ import annotations
 
 import math
@@ -24,15 +28,38 @@ from cafe_assistant.gateway.model_gateway import ChatMessage, ChatModelCascade
 from cafe_assistant.identity.device import issue_device_token, verify_device_token
 from cafe_assistant.identity.otp import OtpService, hash_phone
 from cafe_assistant.memory.session import InMemorySessionMemory, SessionState
-from scripts.embed_menu import backfill_menu_embeddings
-from scripts.seed_menu import TENANT_NAME, seed_database
+from tests.fixtures.legacy_embeddings import backfill_menu_embeddings
+from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
 
 
 class FakeEmbeddingProvider:
+    """Container for fake embedding provider behavior and data."""
+    dimensions = 384
+
     def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed the requested value.
+
+        Args:
+            texts (list[str]):
+                Input texts that should each receive one embedding vector.
+
+        Returns:
+            list[list[float]]:
+                Value produced for the caller according to the function contract.
+        """
         return [self._embed_one(text) for text in texts]
 
     def _embed_one(self, text: str) -> list[float]:
+        """Embed one.
+
+        Args:
+            text (str):
+                Input text to normalize, embed, tokenize, or classify.
+
+        Returns:
+            list[float]:
+                Value produced for the caller according to the function contract.
+        """
         tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
         vector = [
             self._feature(tokens, {"coffee", "espresso", "cappuccino", "latte", "mocha"}),
@@ -46,20 +73,58 @@ class FakeEmbeddingProvider:
         ]
         magnitude = math.sqrt(sum(component * component for component in vector))
         if magnitude == 0:
-            return vector
-        return [component / magnitude for component in vector]
+            return self._pad(vector)
+        return self._pad([component / magnitude for component in vector])
 
     def _feature(self, tokens: set[str], vocabulary: set[str]) -> float:
+        """Handle feature.
+
+        Args:
+            tokens (set[str]):
+                Tokens value required to perform this operation.
+            vocabulary (set[str]):
+                Vocabulary value required to perform this operation.
+
+        Returns:
+            float:
+                Value produced for the caller according to the function contract.
+        """
         return float(len(tokens & vocabulary))
+
+    def _pad(self, vector: list[float]) -> list[float]:
+        """Handle pad.
+
+        Args:
+            vector (list[float]):
+                Vector being normalized, converted, or sent to the vector store.
+
+        Returns:
+            list[float]:
+                Value produced for the caller according to the function contract.
+        """
+        return vector + [0.0] * (self.dimensions - len(vector))
 
 
 class CapturingChatProvider:
+    """Container for capturing chat provider behavior and data."""
     async def stream_chat(
         self,
         messages: list[ChatMessage],
         *,
         timeout_seconds: float,
     ) -> AsyncIterator[str]:
+        """Handle stream chat.
+
+        Args:
+            messages (list[ChatMessage]):
+                Ordered chat messages sent to the configured chat provider.
+            timeout_seconds (float):
+                Maximum time allowed for the streaming chat request.
+
+        Returns:
+            AsyncIterator[str]:
+                Streamed values yielded to the caller as they become available.
+        """
         del timeout_seconds
         item_names = [
             line.removeprefix("SAFE_ITEM:").split("|", 1)[0].strip()
@@ -77,15 +142,38 @@ class CapturingChatProvider:
 
 
 class CapturingSmsSender:
+    """Container for capturing sms sender behavior and data."""
     def __init__(self) -> None:
+        """Initialize the object with the dependencies or values required later.
+
+        Args:
+            None.
+
+        Returns:
+            None:
+                No value is returned; the function completes through side effects or validation.
+        """
         self.sent: list[tuple[str, str]] = []
 
     async def send_otp(self, phone: str, code: str) -> None:
+        """Handle send OTP.
+
+        Args:
+            phone (str):
+                Phone value required to perform this operation.
+            code (str):
+                Code value required to perform this operation.
+
+        Returns:
+            None:
+                No value is returned; the function completes through side effects or validation.
+        """
         self.sent.append((phone, code))
 
 
 @dataclass(slots=True)
 class IdentityFixture:
+    """Container for identity fixture behavior and data."""
     session: AsyncSession
     tenant_id: int
     other_tenant_id: int
@@ -95,6 +183,15 @@ class IdentityFixture:
 
 @pytest.fixture
 async def identity_fixture() -> AsyncIterator[IdentityFixture]:
+    """Handle identity fixture.
+
+    Args:
+        None.
+
+    Returns:
+        AsyncIterator[IdentityFixture]:
+            Streamed values yielded to the caller as they become available.
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -141,6 +238,16 @@ async def identity_fixture() -> AsyncIterator[IdentityFixture]:
 async def test_anonymous_chat_flow_remains_functional(
     identity_fixture: IdentityFixture,
 ) -> None:
+    """Verify that anonymous chat flow remains functional.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Identity fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     result = await identity_fixture.agent.run(
         ChatAgentRequest(
             session_id="anon",
@@ -157,6 +264,16 @@ async def test_anonymous_chat_flow_remains_functional(
 async def test_device_recognition_loads_profile_restrictions(
     identity_fixture: IdentityFixture,
 ) -> None:
+    """Verify that device recognition loads profile restrictions.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Identity fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     token = await _create_consented_customer_with_peanut_profile(identity_fixture)
 
     result = await identity_fixture.agent.run(
@@ -176,6 +293,16 @@ async def test_device_recognition_loads_profile_restrictions(
 async def test_health_facts_are_gated_until_otp_consent(
     identity_fixture: IdentityFixture,
 ) -> None:
+    """Verify that health facts are gated until OTP consent.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Identity fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     session = identity_fixture.session
     tenant_id = identity_fixture.tenant_id
 
@@ -233,6 +360,16 @@ async def test_health_facts_are_gated_until_otp_consent(
 async def test_current_turn_override_beats_stored_profile_for_that_turn(
     identity_fixture: IdentityFixture,
 ) -> None:
+    """Verify that current turn override beats stored profile for that turn.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Identity fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     token = await _create_consented_customer_with_peanut_profile(identity_fixture)
 
     result = await identity_fixture.agent.run(
@@ -251,6 +388,16 @@ async def test_current_turn_override_beats_stored_profile_for_that_turn(
 async def test_profile_deletion_removes_device_access(
     identity_fixture: IdentityFixture,
 ) -> None:
+    """Verify that profile deletion removes device access.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Identity fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     token = await _create_consented_customer_with_peanut_profile(identity_fixture)
     identity = await verify_device_token(
         identity_fixture.session,
@@ -277,6 +424,16 @@ async def test_profile_deletion_removes_device_access(
 async def test_cross_tenant_access_is_blocked(
     identity_fixture: IdentityFixture,
 ) -> None:
+    """Verify that cross tenant access is blocked.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Identity fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     token = await _create_consented_customer_with_peanut_profile(identity_fixture)
     identity = await verify_device_token(
         identity_fixture.session,
@@ -303,6 +460,16 @@ async def test_cross_tenant_access_is_blocked(
 async def _create_consented_customer_with_peanut_profile(
     fixture: IdentityFixture,
 ) -> str:
+    """Create consented customer with peanut profile.
+
+    Args:
+        fixture (IdentityFixture):
+            Fixture value required to perform this operation.
+
+    Returns:
+        str:
+            Value produced for the caller according to the function contract.
+    """
     customer = await get_or_create_customer_by_phone(
         fixture.session,
         tenant_id=fixture.tenant_id,
@@ -329,4 +496,16 @@ async def _create_consented_customer_with_peanut_profile(
 
 
 def _chunks(text: str, chunk_size: int = 12) -> list[str]:
+    """Handle chunks.
+
+    Args:
+        text (str):
+            Input text to normalize, embed, tokenize, or classify.
+        chunk_size (int):
+            Chunk size value required to perform this operation.
+
+    Returns:
+        list[str]:
+            Value produced for the caller according to the function contract.
+    """
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]

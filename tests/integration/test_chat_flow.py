@@ -1,3 +1,7 @@
+"""Tests for chat flow.
+Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""
+
 from __future__ import annotations
 
 import math
@@ -13,15 +17,38 @@ from cafe_assistant.db.base import Base
 from cafe_assistant.db.models import Tenant
 from cafe_assistant.gateway.model_gateway import ChatMessage, ChatModelCascade
 from cafe_assistant.memory.session import InMemorySessionMemory
-from scripts.embed_menu import backfill_menu_embeddings
-from scripts.seed_menu import TENANT_NAME, seed_database
+from tests.fixtures.legacy_embeddings import backfill_menu_embeddings
+from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
 
 
 class FakeEmbeddingProvider:
+    """Container for fake embedding provider behavior and data."""
+    dimensions = 384
+
     def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed the requested value.
+
+        Args:
+            texts (list[str]):
+                Input texts that should each receive one embedding vector.
+
+        Returns:
+            list[list[float]]:
+                Value produced for the caller according to the function contract.
+        """
         return [self._embed_one(text) for text in texts]
 
     def _embed_one(self, text: str) -> list[float]:
+        """Embed one.
+
+        Args:
+            text (str):
+                Input text to normalize, embed, tokenize, or classify.
+
+        Returns:
+            list[float]:
+                Value produced for the caller according to the function contract.
+        """
         tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
         vector = [
             self._feature(tokens, {"coffee", "espresso", "cappuccino", "latte", "mocha"}),
@@ -35,15 +62,50 @@ class FakeEmbeddingProvider:
         ]
         magnitude = math.sqrt(sum(component * component for component in vector))
         if magnitude == 0:
-            return vector
-        return [component / magnitude for component in vector]
+            return self._pad(vector)
+        return self._pad([component / magnitude for component in vector])
 
     def _feature(self, tokens: set[str], vocabulary: set[str]) -> float:
+        """Handle feature.
+
+        Args:
+            tokens (set[str]):
+                Tokens value required to perform this operation.
+            vocabulary (set[str]):
+                Vocabulary value required to perform this operation.
+
+        Returns:
+            float:
+                Value produced for the caller according to the function contract.
+        """
         return float(len(tokens & vocabulary))
+
+    def _pad(self, vector: list[float]) -> list[float]:
+        """Handle pad.
+
+        Args:
+            vector (list[float]):
+                Vector being normalized, converted, or sent to the vector store.
+
+        Returns:
+            list[float]:
+                Value produced for the caller according to the function contract.
+        """
+        return vector + [0.0] * (self.dimensions - len(vector))
 
 
 class CapturingChatProvider:
+    """Container for capturing chat provider behavior and data."""
     def __init__(self) -> None:
+        """Initialize the object with the dependencies or values required later.
+
+        Args:
+            None.
+
+        Returns:
+            None:
+                No value is returned; the function completes through side effects or validation.
+        """
         self.calls: list[list[ChatMessage]] = []
         self.safe_item_lines_by_call: list[list[str]] = []
 
@@ -53,6 +115,18 @@ class CapturingChatProvider:
         *,
         timeout_seconds: float,
     ) -> AsyncIterator[str]:
+        """Handle stream chat.
+
+        Args:
+            messages (list[ChatMessage]):
+                Ordered chat messages sent to the configured chat provider.
+            timeout_seconds (float):
+                Maximum time allowed for the streaming chat request.
+
+        Returns:
+            AsyncIterator[str]:
+                Streamed values yielded to the caller as they become available.
+        """
         del timeout_seconds
         self.calls.append(messages)
         safe_lines = [
@@ -74,6 +148,15 @@ class CapturingChatProvider:
 
 @pytest.fixture
 async def chat_fixture() -> AsyncIterator[tuple[ChatAgent, int, CapturingChatProvider]]:
+    """Handle chat fixture.
+
+    Args:
+        None.
+
+    Returns:
+        AsyncIterator[tuple[ChatAgent, int, CapturingChatProvider]]:
+            Streamed values yielded to the caller as they become available.
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -106,6 +189,16 @@ async def chat_fixture() -> AsyncIterator[tuple[ChatAgent, int, CapturingChatPro
 async def test_peanut_allergy_persists_and_blocks_peanut_recommendations(
     chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
 ) -> None:
+    """Verify that peanut allergy persists and blocks peanut recommendations.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Chat fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     agent, tenant_id, strong_model = chat_fixture
 
     await agent.run(
@@ -132,6 +225,16 @@ async def test_peanut_allergy_persists_and_blocks_peanut_recommendations(
 async def test_fuzzy_request_returns_grounded_menu_item(
     chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
 ) -> None:
+    """Verify that fuzzy request returns grounded menu item.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Chat fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     agent, tenant_id, _strong_model = chat_fixture
 
     result = await agent.run(
@@ -150,6 +253,16 @@ async def test_fuzzy_request_returns_grounded_menu_item(
 async def test_empty_safe_set_uses_staff_check_fallback(
     chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
 ) -> None:
+    """Verify that empty safe set uses staff check fallback.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Chat fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     agent, tenant_id, strong_model = chat_fixture
 
     await agent.run(
@@ -180,6 +293,16 @@ async def test_empty_safe_set_uses_staff_check_fallback(
 async def test_medical_question_is_escalated_with_disclaimer(
     chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
 ) -> None:
+    """Verify that medical question is escalated with disclaimer.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Chat fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     agent, tenant_id, strong_model = chat_fixture
 
     result = await agent.run(
@@ -199,6 +322,16 @@ async def test_medical_question_is_escalated_with_disclaimer(
 async def test_model_context_contains_only_safe_items(
     chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
 ) -> None:
+    """Verify that model context contains only safe items.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Chat fixture value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     agent, tenant_id, strong_model = chat_fixture
 
     result = await agent.run(
@@ -218,6 +351,16 @@ async def test_model_context_contains_only_safe_items(
 
 
 def _latest_safe_item_names(provider: CapturingChatProvider) -> set[str]:
+    """Handle latest safe item names.
+
+    Args:
+        provider (CapturingChatProvider):
+            Optional embedding provider override used by tests or scripts.
+
+    Returns:
+        set[str]:
+            Value produced for the caller according to the function contract.
+    """
     if not provider.safe_item_lines_by_call:
         return set()
     return {
@@ -227,4 +370,16 @@ def _latest_safe_item_names(provider: CapturingChatProvider) -> set[str]:
 
 
 def _chunks(text: str, chunk_size: int = 12) -> list[str]:
+    """Handle chunks.
+
+    Args:
+        text (str):
+            Input text to normalize, embed, tokenize, or classify.
+        chunk_size (int):
+            Chunk size value required to perform this operation.
+
+    Returns:
+        list[str]:
+            Value produced for the caller according to the function contract.
+    """
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]
