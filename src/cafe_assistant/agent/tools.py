@@ -1,7 +1,11 @@
 """Typed agent tool contracts for menu lookup, retrieval, and safety filtering.
-Defines the Pydantic schemas passed between the state machine and deterministic tools.
-These boundaries keep retrieval and dietary filtering explicit so the LLM never receives raw unsafe
-menu data or decides safety itself.
+
+The state machine calls these tools instead of reaching directly into retrieval
+or database code. Each input and output is a Pydantic model so tenant scope,
+customer restrictions, and safe menu results stay explicit at every boundary.
+Menu lookup and retrieval both run deterministic safety filtering before
+returning items, which preserves the invariant that composition never sees raw
+unsafe menu candidates.
 """
 
 from __future__ import annotations
@@ -28,7 +32,13 @@ from cafe_assistant.retrieval.hybrid import search_menu as retrieval_search_menu
 
 
 class RestrictionsSchema(BaseModel):
-    """Pydantic schema for restrictions schema data exchanged at an API or tool boundary."""
+    """Serializable customer restrictions passed into deterministic tools.
+
+    The domain filter owns the safety semantics. This schema only carries those
+    values across API/tool boundaries without weakening allergen or dietary
+    guarantees.
+    """
+
     avoid_allergens: set[AllergenCode] = Field(default_factory=set)
     modes: set[DietaryMode] = Field(default_factory=set)
     prefer_low_sugar: bool = False
@@ -37,7 +47,8 @@ class RestrictionsSchema(BaseModel):
         """Convert this schema object into the domain model used by deterministic safety code.
 
         Args:
-            None.
+            None:
+                This method reads the fields stored on the schema instance.
 
         Returns:
             CustomerRestrictions:
@@ -69,7 +80,13 @@ class RestrictionsSchema(BaseModel):
 
 
 class MenuItemViewSchema(BaseModel):
-    """Pydantic schema for menu item view schema data exchanged at an API or tool boundary."""
+    """Serializable safe menu item view returned by agent tools.
+
+    The fields mirror `MenuItemView` so tool callers can pass filtered menu
+    candidates between retrieval, fallback filtering, and composition without
+    exposing ORM objects or raw rows.
+    """
+
     id: int
     name: str
     allergen_codes: set[AllergenCode]
@@ -104,7 +121,8 @@ class MenuItemViewSchema(BaseModel):
         """Convert this schema object into the domain model used by deterministic safety code.
 
         Args:
-            None.
+            None:
+                This method reads the fields stored on the schema instance.
 
         Returns:
             MenuItemView:
@@ -136,7 +154,12 @@ class MenuLookupInput(BaseModel):
 
 
 class SearchMenuInput(BaseModel):
-    """Pydantic schema for search menu input data exchanged at an API or tool boundary."""
+    """Input schema for hybrid menu search through the agent tool boundary.
+
+    Search receives the active tenant, user query, restrictions, and result
+    size. The tool returns only post-filter safe menu item views.
+    """
+
     tenant_id: int
     query: str
     restrictions: RestrictionsSchema
@@ -144,7 +167,12 @@ class SearchMenuInput(BaseModel):
 
 
 class DietaryFilterInput(BaseModel):
-    """Pydantic schema for dietary filter input data exchanged at an API or tool boundary."""
+    """Input schema for rerunning deterministic safety filtering on known items.
+
+    This is used by fallback paths that already have item candidates but must
+    still enforce the allergen/dietary gate before anything reaches the model.
+    """
+
     items: list[MenuItemViewSchema]
     restrictions: RestrictionsSchema
 
@@ -165,24 +193,31 @@ ToolCallable = Callable[[BaseModel], Awaitable[BaseModel]]
 
 
 class ToolRegistry:
-    """Container for tool registry behavior and data."""
+    """Registry of deterministic tools available to the chat state machine.
+
+    The registry centralizes tool names, input validation, tenant-scoped session
+    access, and optional embedding provider injection. The LLM never calls this
+    object directly; the state machine invokes named tools and enforces budgets.
+    """
+
     def __init__(
         self,
         session: AsyncSession,
         *,
         embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
-        """Initialize the object with the dependencies or values required later.
+        """Create the tool registry for one request-scoped database session.
 
         Args:
             session (AsyncSession):
                 Async SQLAlchemy session used for tenant-scoped database reads and writes.
             embedding_provider (EmbeddingProvider | None):
-                Embedding provider used to create query or record vectors.
+                Optional provider used by hybrid retrieval to embed the query.
+                Tests inject deterministic providers here so no network calls are required.
 
         Returns:
             None:
-                No value is returned; the function completes through side effects or validation.
+                The registry stores dependencies and named tool callables for later use.
         """
         self.session = session
         self.embedding_provider = embedding_provider
@@ -193,17 +228,18 @@ class ToolRegistry:
         }
 
     async def call(self, name: str, input_model: BaseModel) -> BaseModel:
-        """Handle call.
+        """Dispatch one named tool invocation.
 
         Args:
             name (str):
-                Name value required to perform this operation.
+                Registered tool name. Supported names are `menu_lookup`,
+                `search_menu`, and `dietary_filter`.
             input_model (BaseModel):
-                Input model value required to perform this operation.
+                Pydantic input object expected by the selected tool.
 
         Returns:
             BaseModel:
-                Value produced for the caller according to the function contract.
+                Pydantic output object produced by the selected tool.
         """
         with span("tool.call", tool_name=name):
             return await self._tools[name](input_model)
@@ -258,11 +294,12 @@ class ToolRegistry:
 
         Args:
             input_model (BaseModel):
-                Input model value required to perform this operation.
+                `SearchMenuInput` or compatible payload containing tenant,
+                query, active restrictions, and result count.
 
         Returns:
             MenuItemsOutput:
-                Safe menu item views after retrieval and deterministic filtering.
+                Safe menu item views after hybrid retrieval and deterministic filtering.
         """
         tool_input = _coerce(input_model, SearchMenuInput)
         items = await retrieval_search_menu(
@@ -283,15 +320,16 @@ class ToolRegistry:
         return MenuItemsOutput(items=[MenuItemViewSchema.from_domain(item) for item in items])
 
     async def dietary_filter(self, input_model: BaseModel) -> MenuItemsOutput:
-        """Handle dietary filter.
+        """Apply the deterministic dietary/allergen filter to supplied item views.
 
         Args:
             input_model (BaseModel):
-                Input model value required to perform this operation.
+                `DietaryFilterInput` or compatible payload containing candidate
+                item views and active customer restrictions.
 
         Returns:
             MenuItemsOutput:
-                Value produced for the caller according to the function contract.
+                Only the supplied items that pass the deterministic filter.
         """
         tool_input = _coerce(input_model, DietaryFilterInput)
         result = filter_safe_items(
@@ -310,17 +348,18 @@ class ToolRegistry:
 
 
 def _coerce[T: BaseModel](input_model: BaseModel, model_type: type[T]) -> T:
-    """Handle coerce.
+    """Validate or reuse a Pydantic tool input object.
 
     Args:
         input_model (BaseModel):
-            Input model value required to perform this operation.
+            Existing Pydantic object passed through the generic registry boundary.
         model_type (type[T]):
-            Model type value required to perform this operation.
+            Concrete schema class expected by the destination tool.
 
     Returns:
         T:
-            Value produced for the caller according to the function contract.
+            `input_model` when it is already the expected type, otherwise a
+            validated instance of `model_type`.
     """
     if isinstance(input_model, model_type):
         return input_model

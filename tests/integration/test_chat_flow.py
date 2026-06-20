@@ -1,9 +1,13 @@
-"""Tests for chat flow.
-Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""Integration tests for the chat-agent orchestration layer.
+
+The tests use in-memory storage and deterministic fake model/embedding providers
+so deadline handling, tool-budget enforcement, restriction memory, and safe model
+context can be asserted without external network calls.
 """
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from collections.abc import AsyncIterator
@@ -12,8 +16,15 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from cafe_assistant.agent.state_machine import AgentConfig, AgentState, ChatAgent, ChatAgentRequest
-from cafe_assistant.agent.tools import MenuLookupInput, RestrictionsSchema
+from cafe_assistant.agent.router import ClassificationResult, Intent
+from cafe_assistant.agent.state_machine import (
+    SAFE_FAILURE_RESPONSE,
+    AgentConfig,
+    AgentState,
+    ChatAgent,
+    ChatAgentRequest,
+)
+from cafe_assistant.agent.tools import MenuItemsOutput, MenuLookupInput, RestrictionsSchema
 from cafe_assistant.db.base import Base
 from cafe_assistant.db.models import Tenant
 from cafe_assistant.domain.dietary import AllergenCode, CustomerRestrictions
@@ -24,32 +35,37 @@ from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
 
 
 class FakeEmbeddingProvider:
-    """Container for fake embedding provider behavior and data."""
+    """Deterministic embedding provider for retrieval-oriented chat tests.
+
+    The provider turns recognizable menu vocabulary into a small normalized
+    feature vector and pads it to the configured embedding dimension. This keeps
+    fuzzy retrieval behavior stable without contacting a real model provider.
+    """
     dimensions = 384
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed the requested value.
+        """Embed each text with the deterministic test vectorizer.
 
         Args:
             texts (list[str]):
-                Input texts that should each receive one embedding vector.
+                Query or menu texts that should each receive one embedding vector.
 
         Returns:
             list[list[float]]:
-                Value produced for the caller according to the function contract.
+                One fixed-width vector per input text, in the same order.
         """
         return [self._embed_one(text) for text in texts]
 
     def _embed_one(self, text: str) -> list[float]:
-        """Embed one.
+        """Embed one text by counting known menu vocabulary groups.
 
         Args:
             text (str):
-                Input text to normalize, embed, tokenize, or classify.
+                Query or menu text to tokenize and convert into feature counts.
 
         Returns:
             list[float]:
-                Value produced for the caller according to the function contract.
+                Normalized and padded embedding vector for the supplied text.
         """
         tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
         vector = [
@@ -68,45 +84,47 @@ class FakeEmbeddingProvider:
         return self._pad([component / magnitude for component in vector])
 
     def _feature(self, tokens: set[str], vocabulary: set[str]) -> float:
-        """Handle feature.
+        """Count how many recognized vocabulary terms appear in the text.
 
         Args:
             tokens (set[str]):
-                Tokens value required to perform this operation.
+                Lowercase tokens extracted from one input text.
             vocabulary (set[str]):
-                Vocabulary value required to perform this operation.
+                Menu-topic terms represented by one vector dimension.
 
         Returns:
             float:
-                Value produced for the caller according to the function contract.
+                Count of matching tokens as a numeric feature value.
         """
         return float(len(tokens & vocabulary))
 
     def _pad(self, vector: list[float]) -> list[float]:
-        """Handle pad.
+        """Pad a short feature vector to the configured embedding dimension.
 
         Args:
             vector (list[float]):
-                Vector being normalized, converted, or sent to the vector store.
+                Normalized feature values produced for one text.
 
         Returns:
             list[float]:
-                Value produced for the caller according to the function contract.
+                Vector extended with zeros to match the fake provider dimension.
         """
         return vector + [0.0] * (self.dimensions - len(vector))
 
 
 class CapturingChatProvider:
-    """Container for capturing chat provider behavior and data."""
+    """Chat provider double that records model context and streams grounded text."""
+
     def __init__(self) -> None:
-        """Initialize the object with the dependencies or values required later.
+        """Initialize capture buffers used by assertions.
 
         Args:
-            None.
+            None:
+                The provider is self-contained and does not require dependencies.
 
         Returns:
             None:
-                No value is returned; the function completes through side effects or validation.
+                Empty call and safe-item capture lists are ready for later assertions.
         """
         self.calls: list[list[ChatMessage]] = []
         self.safe_item_lines_by_call: list[list[str]] = []
@@ -117,17 +135,18 @@ class CapturingChatProvider:
         *,
         timeout_seconds: float,
     ) -> AsyncIterator[str]:
-        """Handle stream chat.
+        """Record the prompt and stream a deterministic answer from safe items.
 
         Args:
             messages (list[ChatMessage]):
-                Ordered chat messages sent to the configured chat provider.
+                Ordered chat messages built by the composer.
             timeout_seconds (float):
-                Maximum time allowed for the streaming chat request.
+                Maximum time allowed for the streaming chat request. The fake
+                provider accepts the value but does not need it.
 
         Returns:
             AsyncIterator[str]:
-                Streamed values yielded to the caller as they become available.
+                Text chunks naming only items that appeared in `SAFE_ITEM` lines.
         """
         del timeout_seconds
         self.calls.append(messages)
@@ -150,14 +169,15 @@ class CapturingChatProvider:
 
 @pytest.fixture
 async def chat_fixture() -> AsyncIterator[tuple[ChatAgent, int, CapturingChatProvider]]:
-    """Handle chat fixture.
+    """Create a seeded chat agent with deterministic providers.
 
     Args:
-        None.
+        None:
+            Pytest manages fixture construction and teardown.
 
     Returns:
         AsyncIterator[tuple[ChatAgent, int, CapturingChatProvider]]:
-            Streamed values yielded to the caller as they become available.
+            Seeded agent, tenant ID, and strong chat provider capture double.
     """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -195,7 +215,7 @@ async def test_peanut_allergy_persists_and_blocks_peanut_recommendations(
 
     Args:
         chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
-            Chat fixture value required to perform this operation.
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
 
     Returns:
         None:
@@ -274,7 +294,7 @@ async def test_fuzzy_request_returns_grounded_menu_item(
 
     Args:
         chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
-            Chat fixture value required to perform this operation.
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
 
     Returns:
         None:
@@ -302,7 +322,7 @@ async def test_empty_safe_set_uses_staff_check_fallback(
 
     Args:
         chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
-            Chat fixture value required to perform this operation.
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
 
     Returns:
         None:
@@ -342,7 +362,7 @@ async def test_medical_question_is_escalated_with_disclaimer(
 
     Args:
         chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
-            Chat fixture value required to perform this operation.
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
 
     Returns:
         None:
@@ -371,7 +391,7 @@ async def test_model_context_contains_only_safe_items(
 
     Args:
         chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
-            Chat fixture value required to perform this operation.
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
 
     Returns:
         None:
@@ -396,15 +416,15 @@ async def test_model_context_contains_only_safe_items(
 
 
 def _latest_safe_item_names(provider: CapturingChatProvider) -> set[str]:
-    """Handle latest safe item names.
+    """Return item names from the most recent guarded composer context.
 
     Args:
         provider (CapturingChatProvider):
-            Optional embedding provider override used by tests or scripts.
+            Capturing provider that records `SAFE_ITEM` lines for each model call.
 
     Returns:
         set[str]:
-            Value produced for the caller according to the function contract.
+            Menu item names passed to the model during the latest composition call.
     """
     if not provider.safe_item_lines_by_call:
         return set()
@@ -415,16 +435,158 @@ def _latest_safe_item_names(provider: CapturingChatProvider) -> set[str]:
 
 
 def _chunks(text: str, chunk_size: int = 12) -> list[str]:
-    """Handle chunks.
+    """Split fake model output into deterministic streaming chunks.
 
     Args:
         text (str):
-            Input text to normalize, embed, tokenize, or classify.
+            Full fake response text to stream back to the caller.
         chunk_size (int):
-            Chunk size value required to perform this operation.
+            Maximum number of characters per emitted chunk.
 
     Returns:
         list[str]:
-            Value produced for the caller according to the function contract.
+            Ordered chunks that reconstruct `text` when joined.
     """
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]
+
+
+class SlowRouter:
+    """Router double that intentionally exceeds the request deadline."""
+
+    async def classify(self, message: str) -> ClassificationResult:
+        """Sleep before returning a deterministic classification.
+
+        Args:
+            message (str):
+                User message supplied by the state machine. The fake router ignores it.
+
+        Returns:
+            ClassificationResult:
+                Menu route returned only if the request deadline does not cancel the call.
+        """
+        del message
+        await asyncio.sleep(0.05)
+        return ClassificationResult(Intent.MENU_QA, 1.0)
+
+
+async def test_router_timeout_fails_safely_without_raw_exception(
+    chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
+) -> None:
+    """Assert router deadlines produce only the generic safe failure response.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    agent, tenant_id, _strong_model = chat_fixture
+    agent.router = SlowRouter()
+    agent.config = AgentConfig(max_tool_calls=4, deadline_seconds=0.01, search_k=6)
+
+    result = await agent.run(
+        ChatAgentRequest(
+            session_id="slow-router",
+            tenant_id=tenant_id,
+            message="what sounds good today",
+        )
+    )
+
+    assert result.response == SAFE_FAILURE_RESPONSE
+    assert result.state_history == [AgentState.FAILED]
+    assert "deadline" not in result.response.lower()
+
+
+async def test_tool_timeout_fails_safely_without_raw_exception(
+    chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
+) -> None:
+    """Assert slow tools are cancelled by the shared request deadline.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    agent, tenant_id, _strong_model = chat_fixture
+    agent.config = AgentConfig(max_tool_calls=4, deadline_seconds=0.01, search_k=6)
+
+    async def slow_lookup(input_model: object) -> MenuItemsOutput:
+        """Delay menu lookup long enough to exceed the agent deadline.
+
+        Args:
+            input_model (object):
+                Tool input supplied by the registry. The fake tool ignores it.
+
+        Returns:
+            MenuItemsOutput:
+                Empty output if the state machine fails to cancel the call in time.
+        """
+        del input_model
+        await asyncio.sleep(0.05)
+        return MenuItemsOutput(items=[])
+
+    agent.tools._tools["menu_lookup"] = slow_lookup
+
+    result = await agent.run(
+        ChatAgentRequest(
+            session_id="slow-tool",
+            tenant_id=tenant_id,
+            message="Recommend a coffee.",
+        )
+    )
+
+    assert result.response == SAFE_FAILURE_RESPONSE
+    assert result.state_history == [AgentState.FAILED]
+    assert "deadline" not in result.response.lower()
+
+
+async def test_fallback_tool_calls_count_against_budget(
+    chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
+) -> None:
+    """Assert fallback retrieval consumes the same tool-call budget as primary tools.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    agent, tenant_id, _strong_model = chat_fixture
+    agent.config = AgentConfig(max_tool_calls=3, deadline_seconds=10.0, search_k=6)
+
+    async def fail_search(input_model: object) -> MenuItemsOutput:
+        """Raise from primary search so the fallback path is exercised.
+
+        Args:
+            input_model (object):
+                Tool input supplied by the registry. The fake tool ignores it.
+
+        Returns:
+            MenuItemsOutput:
+                This function never returns; it raises to simulate retriever failure.
+        """
+        del input_model
+        raise RuntimeError("primary retriever down")
+
+    agent.tools._tools["search_menu"] = fail_search
+
+    result = await agent.run(
+        ChatAgentRequest(
+            session_id="fallback-budget",
+            tenant_id=tenant_id,
+            message="Recommend a coffee.",
+        )
+    )
+
+    assert result.response == SAFE_FAILURE_RESPONSE
+    assert result.state_history == [AgentState.FAILED]
+    assert result.safe_items == []
+    assert "tool" not in result.response.lower()
+    assert "primary retriever down" not in result.response

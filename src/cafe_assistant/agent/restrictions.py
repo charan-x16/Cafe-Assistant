@@ -1,3 +1,12 @@
+"""Deterministic extraction of customer restrictions from the active turn.
+
+This module is deliberately rule-based. The agent can use model routing for
+conversation classification, but allergen and dietary restrictions must be
+extracted deterministically so safety behavior is stable, testable, and biased
+away from false negatives. Current-turn statements override stored session or
+profile facts for the active turn.
+"""
+
 from __future__ import annotations
 
 import re
@@ -5,20 +14,30 @@ from dataclasses import dataclass
 
 from cafe_assistant.domain.dietary import AllergenCode, CustomerRestrictions, DietaryMode
 
-_ALLERGEN_PATTERNS = {
-    AllergenCode.PEANUT: re.compile(r"\b(peanut|peanuts)\b", re.IGNORECASE),
-    AllergenCode.TREE_NUT: re.compile(r"\b(tree nut|tree nuts|almond|almonds)\b", re.IGNORECASE),
-    AllergenCode.DAIRY: re.compile(r"\b(dairy|milk|cheese|butter)\b", re.IGNORECASE),
-    AllergenCode.GLUTEN: re.compile(r"\b(gluten|wheat)\b", re.IGNORECASE),
-    AllergenCode.SOY: re.compile(r"\b(soy)\b", re.IGNORECASE),
-    AllergenCode.EGG: re.compile(r"\b(egg|eggs)\b", re.IGNORECASE),
+_ALLERGEN_TERMS = {
+    AllergenCode.PEANUT: r"peanuts?",
+    AllergenCode.TREE_NUT: r"tree\s+nuts?|almonds?",
+    AllergenCode.DAIRY: r"dairy|milk|cheese|butter",
+    AllergenCode.GLUTEN: r"gluten|wheat",
+    AllergenCode.SOY: r"soy",
+    AllergenCode.EGG: r"eggs?",
 }
-_NEGATION_PATTERN = re.compile(
-    r"\b(not allergic|no allergy|no allergies|do not avoid|don't avoid)\b",
-    re.IGNORECASE,
-)
+_ALLERGEN_PATTERNS = {
+    allergen: re.compile(rf"\b(?:{term_pattern})\b", re.IGNORECASE)
+    for allergen, term_pattern in _ALLERGEN_TERMS.items()
+}
+_CLAUSE_SPLIT_PATTERN = re.compile(r"\b(?:but|however|though|although)\b|[.;]", re.IGNORECASE)
+_NEGATED_ALLERGEN_PATTERNS = {
+    allergen: re.compile(
+        rf"\b(?:not\s+allergic\s+to|no\s+allerg(?:y|ies)\s+to|"
+        rf"do\s+not\s+avoid|don't\s+avoid)\b(?:(?!\bbut\b).){{0,80}}\b(?:{term_pattern})\b"
+        rf"|\bno\s+(?:{term_pattern})\s+allerg(?:y|ies)\b",
+        re.IGNORECASE,
+    )
+    for allergen, term_pattern in _ALLERGEN_TERMS.items()
+}
 _ALLERGY_PATTERN = re.compile(
-    r"\b(allergic|allergy|avoid|can't have|cannot have|without)\b",
+    r"\b(allergic|allergy|allergies|avoid|can't have|cannot have|without)\b",
     re.IGNORECASE,
 )
 _LOW_SUGAR_PATTERN = re.compile(
@@ -37,6 +56,8 @@ _MEDICAL_PATTERN = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class RestrictionExtraction:
+    """Restrictions and escalation flags extracted from one user message."""
+
     restrictions: CustomerRestrictions
     medical_question: bool
 
@@ -45,21 +66,44 @@ def extract_restrictions(
     message: str,
     stored: CustomerRestrictions | None = None,
 ) -> RestrictionExtraction:
+    """Extract active-turn restrictions from a user message.
+
+    Args:
+        message (str):
+            Current user message. This is treated as untrusted text and parsed
+            only with deterministic regex rules.
+        stored (CustomerRestrictions | None):
+            Session/profile restrictions remembered before this turn. Explicit
+            current-turn negations remove matching stored allergen avoidances;
+            explicit current-turn avoidances add matching allergens.
+
+    Returns:
+        RestrictionExtraction:
+            The merged active restrictions plus a flag indicating whether the
+            message asked for medical advice and should be escalated/refused.
+    """
     avoid_allergens = set(stored.avoid_allergens) if stored is not None else set()
     modes = set(stored.modes) if stored is not None else set()
     prefer_low_sugar = stored.prefer_low_sugar if stored is not None else False
 
-    lower_message = message.lower()
-    has_negation = bool(_NEGATION_PATTERN.search(message))
-    has_allergy_language = bool(_ALLERGY_PATTERN.search(message))
-
-    for allergen, pattern in _ALLERGEN_PATTERNS.items():
-        if not pattern.search(message):
+    for clause in _allergen_clauses(message):
+        clause_allergens = {
+            allergen
+            for allergen, pattern in _ALLERGEN_PATTERNS.items()
+            if pattern.search(clause)
+        }
+        if not clause_allergens:
             continue
-        if has_negation:
-            avoid_allergens.discard(allergen)
-        elif has_allergy_language:
-            avoid_allergens.add(allergen)
+
+        negated_allergens = {
+            allergen
+            for allergen in clause_allergens
+            if _NEGATED_ALLERGEN_PATTERNS[allergen].search(clause)
+        }
+        avoid_allergens.difference_update(negated_allergens)
+
+        if _ALLERGY_PATTERN.search(clause):
+            avoid_allergens.update(clause_allergens - negated_allergens)
 
     if _VEGAN_PATTERN.search(message):
         modes.add(DietaryMode.VEGAN)
@@ -77,5 +121,21 @@ def extract_restrictions(
             modes=modes,
             prefer_low_sugar=prefer_low_sugar,
         ),
-        medical_question=bool(_MEDICAL_PATTERN.search(lower_message)),
+        medical_question=bool(_MEDICAL_PATTERN.search(message)),
     )
+
+
+def _allergen_clauses(message: str) -> list[str]:
+    """Split a message on contrast boundaries relevant to allergen statements.
+
+    Args:
+        message (str):
+            Current user message to split into local allergen contexts.
+
+    Returns:
+        list[str]:
+            Non-empty clauses. Commas and `and` are intentionally preserved so
+            phrases such as "allergic to peanuts, tree nuts, and dairy" still
+            apply one allergy statement to the full allergen list.
+    """
+    return [clause.strip() for clause in _CLAUSE_SPLIT_PATTERN.split(message) if clause.strip()]

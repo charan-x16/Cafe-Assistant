@@ -1,3 +1,11 @@
+"""Response composition boundary for safe menu answers.
+
+The composer receives only the final `safe_items` selected by deterministic
+retrieval and filtering. It builds guarded chat messages, wraps all untrusted
+user/menu/preference text, records model cost metrics, and stores the last prompt
+messages for tests that verify unsafe items never reach model context.
+"""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -21,6 +29,8 @@ _PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
 
 @dataclass(frozen=True, slots=True)
 class ComposeInput:
+    """Grounded input allowed into response composition."""
+
     user_message: str
     safe_items: list[MenuItemView]
     restrictions: CustomerRestrictions
@@ -29,7 +39,19 @@ class ComposeInput:
 
 
 class ResponseComposer:
+    """Build and stream final natural-language responses from safe item context."""
+
     def __init__(self, strong_model: ChatProvider) -> None:
+        """Create a composer backed by the strong chat provider.
+
+        Args:
+            strong_model (ChatProvider):
+                Provider used for final answer synthesis.
+
+        Returns:
+            None:
+                The composer is ready to build guarded prompts.
+        """
         self.strong_model = strong_model
         self.last_messages: list[ChatMessage] = []
 
@@ -39,6 +61,19 @@ class ResponseComposer:
         *,
         timeout_seconds: float,
     ) -> AsyncIterator[str]:
+        """Stream a composed answer from the strong model.
+
+        Args:
+            compose_input (ComposeInput):
+                User message, active restrictions, preferences, and safe items.
+            timeout_seconds (float):
+                Remaining request time allowed for model streaming.
+
+        Returns:
+            AsyncIterator[str]:
+                Model tokens as they arrive. Metrics and trace attributes are
+                recorded after streaming completes.
+        """
         messages = self._build_messages(compose_input)
         self.last_messages = messages
         input_text = "\n".join(message.content for message in messages)
@@ -83,12 +118,35 @@ class ResponseComposer:
             )
 
     async def compose(self, compose_input: ComposeInput, *, timeout_seconds: float) -> str:
+        """Return the full composed answer as a string.
+
+        Args:
+            compose_input (ComposeInput):
+                Grounded composition input containing only safe menu items.
+            timeout_seconds (float):
+                Remaining request time allowed for model streaming.
+
+        Returns:
+            str:
+                Concatenated model output.
+        """
         chunks: list[str] = []
         async for token in self.stream(compose_input, timeout_seconds=timeout_seconds):
             chunks.append(token)
         return "".join(chunks)
 
     def _build_messages(self, compose_input: ComposeInput) -> list[ChatMessage]:
+        """Build guarded chat messages for final answer synthesis.
+
+        Args:
+            compose_input (ComposeInput):
+                Grounded composition input containing only safe menu items.
+
+        Returns:
+            list[ChatMessage]:
+                System prompt and user-context message. All untrusted values are
+                wrapped or neutralized before returning.
+        """
         safe_lines = [
             f"SAFE_ITEM: {neutralize_instruction_patterns(item.name)} | "
             f"sugar_grams={item.sugar_grams} | "
