@@ -1,5 +1,10 @@
-"""Implementation module for config.
-Contains typed helpers used by the cafe assistant backend runtime.
+"""Environment-backed configuration for the cafe assistant backend.
+
+The application reads all runtime settings through this module so local Docker,
+Neon Postgres, Qdrant, Redis, model providers, observability, and governance
+settings share one typed source of truth. Validators normalize common deployment
+URL formats into the async forms expected by the backend without leaking secrets
+or requiring callers to know provider-specific quirks.
 """
 
 from functools import lru_cache
@@ -10,7 +15,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Container for settings behavior and data."""
+    """Typed application settings loaded from environment variables and `.env`.
+
+    The fields in this class intentionally mirror deployment configuration: SQL,
+    Redis, embeddings, Qdrant, chat providers, identity, rate limits, retention,
+    tracing, and evaluation budgets. Defaults are safe for local development;
+    production should override secrets, external service URLs, and provider keys.
+    """
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -30,6 +41,7 @@ class Settings(BaseSettings):
     qdrant_endpoint: str | None = None
     qdrant_api_key: str | None = None
     qdrant_collection: str = "cafe_assistant_menu_policy"
+    qdrant_timeout_seconds: float = 3.0
     llm_provider: str = "local"
     llm_model: str = "local"
     llm_api_key: str | None = None
@@ -63,15 +75,20 @@ class Settings(BaseSettings):
     @field_validator("database_url", mode="before")
     @classmethod
     def _normalize_database_url(cls, value: object) -> object:
-        """Normalize database url.
+        """Normalize Postgres URLs into SQLAlchemy asyncpg-compatible URLs.
 
         Args:
             value (object):
-                Value value required to perform this operation.
+                Raw `DATABASE_URL` value read from the environment. Non-string
+                values are returned unchanged so Pydantic can report type errors.
 
         Returns:
             object:
-                Value produced for the caller according to the function contract.
+                A normalized database URL string when `value` is a Postgres URL;
+                otherwise the original value. The normalization converts
+                `postgresql://` to `postgresql+asyncpg://`, maps `sslmode` to the
+                asyncpg `ssl` query parameter, and removes unsupported
+                `channel_binding` parameters commonly emitted by managed hosts.
         """
         if not isinstance(value, str):
             return value
@@ -117,15 +134,17 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _blank_string_to_none(cls, value: object) -> object:
-        """Handle blank string to none.
+        """Treat blank optional secret and endpoint values as missing.
 
         Args:
             value (object):
-                Value value required to perform this operation.
+                Raw environment value for an optional key, URL, or endpoint field.
 
         Returns:
             object:
-                Value produced for the caller according to the function contract.
+                `None` for blank strings, otherwise the original value. This lets
+                callers use empty entries in `.env` without accidentally enabling
+                a provider with an unusable empty credential.
         """
         if isinstance(value, str) and not value.strip():
             return None
@@ -133,14 +152,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _use_qdrant_endpoint_alias(self) -> "Settings":
-        """Handle use Qdrant endpoint alias.
+        """Populate `qdrant_url` from the legacy `qdrant_endpoint` alias.
 
         Args:
             None.
 
         Returns:
-            'Settings':
-                Value produced for the caller according to the function contract.
+            Settings:
+                The same settings instance with `qdrant_url` filled from
+                `qdrant_endpoint` when only the alias was provided.
         """
         if self.qdrant_url is None and self.qdrant_endpoint is not None:
             self.qdrant_url = self.qdrant_endpoint
@@ -149,14 +169,15 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Return the cached environment settings object.
+    """Load and cache environment settings for the current process.
 
     Args:
         None.
 
     Returns:
         Settings:
-            Cached Settings instance loaded from environment variables.
+            Cached typed settings object. The cache avoids repeatedly parsing
+            `.env` and environment variables during request handling.
     """
     return Settings()
 

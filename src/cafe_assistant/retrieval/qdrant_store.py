@@ -1,6 +1,14 @@
-"""Qdrant vector index adapter for catalog item and policy chunk pointers.
-Qdrant stores vectors plus tenant/source metadata only; retrieval resolves source IDs back to
-Postgres/Neon for authoritative text and safety fields.
+"""Qdrant vector-index adapter for catalog-item and policy-chunk pointers.
+
+Qdrant is used only as a similarity index. It stores vectors plus routing metadata
+such as tenant ID, source kind, source row ID, embedding provider, model name, and
+dimension. It does not own menu text, policy text, allergen facts, dietary facts,
+or availability. Retrieval must resolve returned IDs back to Postgres/Neon before
+anything can be shown to the agent or user.
+
+The adapter normalizes network, HTTP, and malformed-response failures into
+`QdrantVectorStoreError` so callers can fall back to SQL/pgvector paths without
+leaking raw transport exceptions into user-facing flows.
 """
 
 from __future__ import annotations
@@ -17,14 +25,22 @@ from cafe_assistant.retrieval.types import SearchHit
 
 
 class QdrantSourceKind(StrEnum):
-    """Enumeration of supported Qdrant source kind values."""
+    """Source families stored in the shared Qdrant collection."""
+
     CATALOG_ITEM = "catalog_item"
     POLICY_CHUNK = "policy_chunk"
 
 
 @dataclass(frozen=True, slots=True)
 class QdrantVectorPoint:
-    """Container for Qdrant vector point behavior and data."""
+    """Vector and routing metadata for one Qdrant point upsert.
+
+    Catalog item points use `source_kind=CATALOG_ITEM` and `source_id` as the
+    catalog variant ID. Policy points use `source_kind=POLICY_CHUNK` and
+    `source_id` as the policy chunk ID. Optional version/document IDs are stored
+    as payload metadata for replay and debugging, not as authoritative content.
+    """
+
     tenant_id: int
     source_kind: QdrantSourceKind
     source_id: int
@@ -34,28 +50,35 @@ class QdrantVectorPoint:
     policy_document_id: int | None = None
 
 
+class QdrantVectorStoreError(RuntimeError):
+    """Raised when Qdrant cannot complete an index operation safely."""
+
+
 def qdrant_enabled() -> bool:
-    """Report whether Qdrant is the active configured vector index.
+    """Return whether runtime settings select Qdrant as the vector index.
 
     Args:
         None.
 
     Returns:
         bool:
-            True when vector search should use Qdrant; otherwise false.
+            True when `VECTOR_PROVIDER=qdrant` and a Qdrant URL is configured;
+            otherwise false so retrieval can use the SQL/pgvector fallback path.
     """
     return settings.vector_provider == "qdrant" and bool(settings.qdrant_url)
 
 
 async def ensure_qdrant_collection() -> None:
-    """Create or validate the configured Qdrant collection.
+    """Create the configured Qdrant collection or verify its vector size.
 
     Args:
         None.
 
     Returns:
         None:
-            No value; raises if the existing collection is incompatible.
+            The collection exists with the configured vector dimension. A
+            `QdrantVectorStoreError` or `RuntimeError` is raised when Qdrant
+            rejects the request or the existing collection shape is incompatible.
     """
     async with _client() as client:
         response = await client.get(_collection_url())
@@ -67,15 +90,17 @@ async def ensure_qdrant_collection() -> None:
 
 
 async def upsert_qdrant_points(points: list[QdrantVectorPoint]) -> None:
-    """Write catalog or policy vector points to Qdrant.
+    """Upsert catalog or policy vectors into the configured Qdrant collection.
 
     Args:
         points (list[QdrantVectorPoint]):
-            Qdrant vector points to upsert into the configured collection.
+            Vector points produced by the embedding backfill script. Each point
+            includes tenant, source-kind, source-ID, and embedding-version payload
+            fields required for tenant-safe retrieval.
 
     Returns:
         None:
-            No value; points are persisted in Qdrant as a side effect.
+            Points are persisted in Qdrant. Empty input is a no-op.
     """
     if not points:
         return
@@ -104,19 +129,21 @@ async def search_catalog_item_vectors(
     query_embedding: list[float],
     k: int,
 ) -> list[SearchHit]:
-    """Search Qdrant for catalog item source IDs similar to a query vector.
+    """Search Qdrant for catalog variant IDs similar to a query vector.
 
     Args:
         tenant_id (int):
-            Tenant identifier used to scope database and vector-store operations.
+            Tenant scope required in the Qdrant payload filter.
         query_embedding (list[float]):
-            Embedding vector produced from the user query.
+            Query vector produced by the configured embedding provider/model.
         k (int):
-            Maximum number of ranked candidates or results to return.
+            Maximum number of catalog vector hits to request from Qdrant.
 
     Returns:
         list[SearchHit]:
-            Ranked catalog search hits containing source IDs and scores.
+            Ranked semantic hits whose `item_id` values are catalog variant IDs.
+            Callers must reload these IDs from SQL before safety filtering or
+            response composition.
     """
     hits = await _search_vectors(
         tenant_id=tenant_id,
@@ -141,19 +168,20 @@ async def search_policy_chunk_vectors(
     query_embedding: list[float],
     k: int,
 ) -> list[tuple[int, float]]:
-    """Search Qdrant for policy chunk source IDs similar to a query vector.
+    """Search Qdrant for policy chunk IDs similar to a query vector.
 
     Args:
         tenant_id (int):
-            Tenant identifier used to scope database and vector-store operations.
+            Tenant scope required in the Qdrant payload filter.
         query_embedding (list[float]):
-            Embedding vector produced from the user query.
+            Query vector produced by the configured embedding provider/model.
         k (int):
-            Maximum number of ranked candidates or results to return.
+            Maximum number of policy vector hits to request from Qdrant.
 
     Returns:
         list[tuple[int, float]]:
-            Policy chunk IDs paired with vector similarity scores.
+            Policy chunk IDs paired with Qdrant similarity scores. Callers must
+            reload chunk text from SQL before adding it to model context.
     """
     return await _search_vectors(
         tenant_id=tenant_id,
@@ -170,58 +198,77 @@ async def _search_vectors(
     query_embedding: list[float],
     k: int,
 ) -> list[tuple[int, float]]:
-    """Search vectors.
+    """Run a tenant-scoped Qdrant vector search for one source family.
 
     Args:
         tenant_id (int):
-            Tenant identifier used to scope database and vector-store operations.
+            Tenant ID applied as a mandatory Qdrant payload filter.
         source_kind (QdrantSourceKind):
-            Qdrant source kind used to filter vector search results.
+            Source family filter that prevents menu and policy vectors from being
+            mixed in one search result set.
         query_embedding (list[float]):
-            Embedding vector produced from the user query.
+            Query vector with the configured embedding dimension.
         k (int):
-            Maximum number of ranked candidates or results to return.
+            Maximum number of matching points to return.
 
     Returns:
         list[tuple[int, float]]:
-            Ranked search results or source IDs matching the query constraints.
+            Source row IDs and similarity scores from valid Qdrant result rows.
+            Malformed rows are ignored because SQL reload will be the authority.
+
+    Raises:
+        QdrantVectorStoreError:
+            Raised for Qdrant HTTP/client failures or malformed top-level JSON so
+            callers can record fallback metrics and continue safely.
     """
     if k <= 0 or not query_embedding or not qdrant_enabled():
         return []
 
-    async with _client() as client:
-        response = await client.post(
-            f"{_collection_url()}/points/search",
-            json={
-                "vector": query_embedding,
-                "limit": k,
-                "with_payload": True,
-                "filter": {
-                    "must": [
-                        {"key": "tenant_id", "match": {"value": tenant_id}},
-                        {"key": "source_kind", "match": {"value": source_kind.value}},
-                        {
-                            "key": "embedding_provider",
-                            "match": {"value": settings.embedding_provider},
-                        },
-                        {
-                            "key": "embedding_model_name",
-                            "match": {"value": settings.embedding_model_name},
-                        },
-                        {
-                            "key": "embedding_dimension",
-                            "match": {"value": settings.embedding_dimension},
-                        },
-                    ]
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"{_collection_url()}/points/search",
+                json={
+                    "vector": query_embedding,
+                    "limit": k,
+                    "with_payload": True,
+                    "filter": {
+                        "must": [
+                            {"key": "tenant_id", "match": {"value": tenant_id}},
+                            {"key": "source_kind", "match": {"value": source_kind.value}},
+                            {
+                                "key": "embedding_provider",
+                                "match": {"value": settings.embedding_provider},
+                            },
+                            {
+                                "key": "embedding_model_name",
+                                "match": {"value": settings.embedding_model_name},
+                            },
+                            {
+                                "key": "embedding_dimension",
+                                "match": {"value": settings.embedding_dimension},
+                            },
+                        ]
+                    },
                 },
-            },
-        )
-        _raise_for_qdrant_error(response)
+            )
+            _raise_for_qdrant_error(response)
+        response_payload = response.json()
+        if not isinstance(response_payload, dict):
+            raise ValueError("Qdrant search response root must be an object.")
+        results = response_payload.get("result", [])
+    except httpx.HTTPError as exc:
+        raise QdrantVectorStoreError("Qdrant search request failed.") from exc
+    except ValueError as exc:
+        raise QdrantVectorStoreError("Qdrant search response was not valid JSON.") from exc
 
-    results = response.json().get("result", [])
     hits: list[tuple[int, float]] = []
     for result in results:
+        if not isinstance(result, dict):
+            continue
         payload = result.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
         source_id = payload.get("source_id")
         score = result.get("score")
         if isinstance(source_id, int) and isinstance(score, int | float):
@@ -230,15 +277,16 @@ async def _search_vectors(
 
 
 async def _create_collection(client: httpx.AsyncClient) -> None:
-    """Create collection.
+    """Create the Qdrant collection with the configured vector dimension.
 
     Args:
         client (httpx.AsyncClient):
-            HTTP client used to call the Qdrant API.
+            Authenticated HTTP client used to call the Qdrant API.
 
     Returns:
         None:
-            No value is returned; the function completes through side effects or validation.
+            The collection is created or a `QdrantVectorStoreError` is raised for
+            an unsuccessful Qdrant response.
     """
     response = await client.put(
         _collection_url(),
@@ -253,15 +301,21 @@ async def _create_collection(client: httpx.AsyncClient) -> None:
 
 
 def _validate_collection_config(payload: dict[str, Any]) -> None:
-    """Validate collection config.
+    """Validate that an existing Qdrant collection matches embedding settings.
 
     Args:
         payload (dict[str, Any]):
-            JSON-like payload read from an API request, test case, or trace.
+            JSON response body returned by Qdrant's collection metadata endpoint.
 
     Returns:
         None:
-            No value is returned; the function completes through side effects or validation.
+            Validation succeeds when Qdrant reports no size or the size matches
+            `settings.embedding_dimension`.
+
+    Raises:
+        RuntimeError:
+            Raised when the existing collection dimension does not match the
+            configured embedding dimension.
     """
     vectors = (
         payload.get("result", {})
@@ -278,15 +332,17 @@ def _validate_collection_config(payload: dict[str, Any]) -> None:
 
 
 def _point_payload(point: QdrantVectorPoint) -> dict[str, object]:
-    """Handle point payload.
+    """Build the Qdrant payload stored beside one vector.
 
     Args:
         point (QdrantVectorPoint):
-            Qdrant vector point being serialized or addressed.
+            Vector point containing tenant, source, content-hash, and optional
+            version metadata.
 
     Returns:
         dict[str, object]:
-            Value produced for the caller according to the function contract.
+            Payload used for filtering and incident replay. It intentionally
+            contains IDs and hashes, not raw menu or policy text.
     """
     payload: dict[str, object] = {
         "tenant_id": point.tenant_id,
@@ -305,15 +361,17 @@ def _point_payload(point: QdrantVectorPoint) -> dict[str, object]:
 
 
 def _point_id(point: QdrantVectorPoint) -> str:
-    """Handle point ID.
+    """Create a stable UUID for one tenant/source row in one collection.
 
     Args:
         point (QdrantVectorPoint):
-            Qdrant vector point being serialized or addressed.
+            Vector point whose tenant, source kind, and source row ID identify the
+            logical Qdrant record.
 
     Returns:
         str:
-            Value produced for the caller according to the function contract.
+            Deterministic UUID string. Re-running embedding backfill for the same
+            source updates the same Qdrant point instead of creating duplicates.
     """
     return str(
         uuid.uuid5(
@@ -329,30 +387,32 @@ def _point_id(point: QdrantVectorPoint) -> str:
 
 
 def _client() -> httpx.AsyncClient:
-    """Handle client.
+    """Create the short-lived HTTP client used for Qdrant API calls.
 
     Args:
         None.
 
     Returns:
         httpx.AsyncClient:
-            Value produced for the caller according to the function contract.
+            Client configured with Qdrant headers and the retrieval timeout from
+            settings so vector outages fail fast and callers can fall back.
     """
     return httpx.AsyncClient(
-        timeout=30.0,
+        timeout=settings.qdrant_timeout_seconds,
         headers=_headers(),
     )
 
 
 def _headers() -> dict[str, str]:
-    """Handle headers.
+    """Build HTTP headers for Qdrant requests.
 
     Args:
         None.
 
     Returns:
         dict[str, str]:
-            Value produced for the caller according to the function contract.
+            Headers containing JSON content type and the optional Qdrant API key.
+            The API key is passed as a header and is never logged by this module.
     """
     headers = {"Content-Type": "application/json"}
     if settings.qdrant_api_key:
@@ -361,14 +421,18 @@ def _headers() -> dict[str, str]:
 
 
 def _collection_url() -> str:
-    """Handle collection url.
+    """Build the configured Qdrant collection URL.
 
     Args:
         None.
 
     Returns:
         str:
-            Value produced for the caller according to the function contract.
+            Fully qualified Qdrant collection endpoint.
+
+    Raises:
+        RuntimeError:
+            Raised when Qdrant was selected but no Qdrant URL was configured.
     """
     if not settings.qdrant_url:
         raise RuntimeError("QDRANT_URL is required when VECTOR_PROVIDER=qdrant.")
@@ -377,19 +441,23 @@ def _collection_url() -> str:
 
 
 def _raise_for_qdrant_error(response: httpx.Response) -> None:
-    """Handle raise for Qdrant error.
+    """Convert unsuccessful Qdrant HTTP responses into adapter errors.
 
     Args:
         response (httpx.Response):
-            HTTP or chat response object being parsed or checked.
+            HTTP response returned by Qdrant.
 
     Returns:
         None:
-            No value is returned; the function completes through side effects or validation.
+            The response was successful.
+
+    Raises:
+        QdrantVectorStoreError:
+            Raised when Qdrant responds with a non-2xx HTTP status.
     """
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        raise RuntimeError(
+        raise QdrantVectorStoreError(
             f"Qdrant request failed with HTTP {exc.response.status_code}."
         ) from exc
