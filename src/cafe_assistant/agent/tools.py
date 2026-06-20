@@ -122,9 +122,16 @@ class MenuItemViewSchema(BaseModel):
 
 
 class MenuLookupInput(BaseModel):
-    """Pydantic schema for menu lookup input data exchanged at an API or tool boundary."""
+    """Input schema for exact menu lookup through the agent tool boundary.
+
+    The lookup tool is intentionally safety-aware: callers must provide the
+    customer restrictions for the active turn so exact lookup cannot return raw
+    menu candidates that bypass the deterministic dietary/allergen filter.
+    """
+
     tenant_id: int
     query: str
+    restrictions: RestrictionsSchema
     limit: int = 5
 
 
@@ -143,8 +150,15 @@ class DietaryFilterInput(BaseModel):
 
 
 class MenuItemsOutput(BaseModel):
-    """Pydantic schema for menu items output data exchanged at an API or tool boundary."""
+    """Output schema for menu tools that expose only safety-filtered items.
+
+    The `items` field is the only menu content returned to callers and must
+    contain safe `MenuItemViewSchema` records. `excluded_count` is metadata for
+    control flow and observability; it does not expose unsafe menu item content.
+    """
+
     items: list[MenuItemViewSchema]
+    excluded_count: int = 0
 
 
 ToolCallable = Callable[[BaseModel], Awaitable[BaseModel]]
@@ -195,15 +209,17 @@ class ToolRegistry:
             return await self._tools[name](input_model)
 
     async def menu_lookup(self, input_model: BaseModel) -> MenuItemsOutput:
-        """Handle menu lookup.
+        """Run exact menu lookup and return only safety-filtered menu items.
 
         Args:
             input_model (BaseModel):
-                Input model value required to perform this operation.
+                `MenuLookupInput` or compatible payload containing tenant,
+                query, active restrictions, and result limit.
 
         Returns:
             MenuItemsOutput:
-                Value produced for the caller according to the function contract.
+                Safe lookup matches plus a count of matching records excluded by
+                the deterministic dietary/allergen filter.
         """
         tool_input = _coerce(input_model, MenuLookupInput)
         views = await load_published_catalog_item_views_for_tenant(
@@ -213,19 +229,29 @@ class ToolRegistry:
         if not views:
             views = await load_menu_item_views_for_tenant(self.session, tool_input.tenant_id)
         query = tool_input.query.lower().strip()
-        matches = [
+        raw_matches = [
             view
             for view in views
-            if query in view.name.lower() or view.name.lower() in query
-        ][: tool_input.limit]
+            if not query or query in view.name.lower() or view.name.lower() in query
+        ]
+        filter_result = filter_safe_items(
+            raw_matches,
+            tool_input.restrictions.to_domain(),
+        )
+        matches = filter_result.safe_items[: tool_input.limit]
+        excluded_count = sum(1 for decision in filter_result.decisions if not decision.included)
         with span(
             "tool.menu_lookup",
             tool_name="menu_lookup",
             tenant_id=tool_input.tenant_id,
             retrieved_item_ids=[item.id for item in matches],
+            excluded_item_count=excluded_count,
         ):
             pass
-        return MenuItemsOutput(items=[MenuItemViewSchema.from_domain(item) for item in matches])
+        return MenuItemsOutput(
+            items=[MenuItemViewSchema.from_domain(item) for item in matches],
+            excluded_count=excluded_count,
+        )
 
     async def search_menu(self, input_model: BaseModel) -> MenuItemsOutput:
         """Retrieve menu candidates and return only items approved by the safety filter.

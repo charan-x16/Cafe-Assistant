@@ -55,34 +55,73 @@ mockable so they run without external model or vector-store calls.
 
 ### Runtime Components
 
-```text
-Browser / client
-  |
-  | POST /chat, identity endpoints, metrics/replay
-  v
-FastAPI app
-  |
-  | tenant resolution, request id, rate limit
-  v
-Chat agent state machine
-  |
-  | classify -> retrieve -> filter -> recommend -> compose
-  v
-Deterministic safety filter
-  |
-  | safe items only
-  v
-Composer / chat provider
+The diagram below shows the full production shape of the system. The important
+boundary is that Qdrant and retrieval only produce candidate IDs; SQL remains the
+source of truth, and every menu path crosses the deterministic safety filter
+before the LLM composer sees an item.
 
-PostgreSQL / Neon:
-  relational menu source of truth, profiles, consent, audit events
+```mermaid
+flowchart TD
+    Client["Browser / cafe table client"] -->|"POST /chat, consent, profile, health"| API["FastAPI application"]
+    QR["QR payload<br/>cafe_id / location_id / table_id"] --> API
 
-Qdrant:
-  semantic vector index for catalog variants and policy chunks
+    API --> Deps["API dependencies<br/>tenant context, request id, rate limit"]
+    Deps --> Redis["Redis<br/>session turns, OTP challenges, rate limits"]
+    Deps --> Agent["Chat agent state machine<br/>CLASSIFIED -> RETRIEVING -> FILTERING -> RECOMMENDING -> COMPOSING"]
 
-Redis:
-  session memory, OTP challenges, rate limits
+    Agent --> Router["Router<br/>rules + cheap model classification"]
+    Agent --> Memory["Memory merge<br/>Redis session + durable profile"]
+    Memory --> Redis
+    Memory --> SQL["Postgres / Neon<br/>source of truth"]
+
+    Agent --> Tools["Typed deterministic tools<br/>menu_lookup, search_menu, dietary_filter"]
+    Tools --> Retrieval["Hybrid retrieval<br/>keyword + semantic + rerank"]
+    Retrieval --> Keyword["SQL keyword / fuzzy search"]
+    Retrieval --> EmbedQuery["Embedding gateway<br/>BAAI/bge-small-en-v1.5"]
+    EmbedQuery --> Qdrant["Qdrant vector index<br/>catalog_item + policy_chunk points"]
+    Qdrant -->|"source_kind + source_id only"| Retrieval
+    Keyword --> SQL
+    Retrieval --> Repo["Menu repositories<br/>load authoritative catalog rows"]
+    Repo --> SQL
+
+    Tools --> Safety["Deterministic safety filter<br/>allergen + dietary hard gate"]
+    Repo --> Safety
+    Safety -->|"safe MenuItemView only"| Agent
+
+    Agent --> Composer["Composer<br/>grounded response from safe items only"]
+    Composer --> ChatProvider["Chat provider<br/>OpenAI or configured fallback"]
+    ChatProvider --> Client
+
+    API --> Identity["Identity and consent routes<br/>OTP upgrade, profile view/delete"]
+    Identity --> SQL
+    Identity --> Redis
+
+    API --> Observability["Observability<br/>traces, metrics, audit events"]
+    Agent --> Observability
+    Tools --> Observability
+    Observability --> SQL
+
+    Docs["BTB Markdown source docs<br/>menu, attributes, policies"] --> Importer["scripts/import_btb_documents.py"]
+    Importer --> SQL
+    SQL --> EmbedCatalog["scripts/embed_catalog.py"]
+    EmbedCatalog --> Qdrant
+
+    Evals["Automated eval suite<br/>allergen hard gate, groundedness, latency"] --> API
+    Replay["Incident replay"] --> Observability
 ```
+
+How to read the diagram:
+
+- **Postgres/Neon is authoritative.** It stores tenants, catalog rows, policy
+  chunks, allergen/dietary assertions, profiles, consents, and audit events.
+- **Qdrant is only an index.** It stores vectors plus `tenant_id`, `source_kind`,
+  and `source_id`; the app reloads real rows from SQL before using content.
+- **Redis is operational state.** It stores short-lived session turns, OTP
+  challenges, and rate-limit counters.
+- **The safety filter is the hard gate.** Retrieval, exact lookup, and fallback
+  paths return only `MenuItemView` records that passed deterministic filtering.
+- **The LLM sees safe items only.** It may explain or phrase recommendations,
+  but it never decides allergen or dietary safety.
 
 ### Package Map
 

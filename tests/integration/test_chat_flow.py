@@ -13,8 +13,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cafe_assistant.agent.state_machine import AgentConfig, AgentState, ChatAgent, ChatAgentRequest
+from cafe_assistant.agent.tools import MenuLookupInput, RestrictionsSchema
 from cafe_assistant.db.base import Base
 from cafe_assistant.db.models import Tenant
+from cafe_assistant.domain.dietary import AllergenCode, CustomerRestrictions
 from cafe_assistant.gateway.model_gateway import ChatMessage, ChatModelCascade
 from cafe_assistant.memory.session import InMemorySessionMemory
 from tests.fixtures.legacy_embeddings import backfill_menu_embeddings
@@ -220,6 +222,49 @@ async def test_peanut_allergy_persists_and_blocks_peanut_recommendations(
     assert all(item.name != "Peanut Butter Cookie" for item in result.safe_items)
     assert _latest_safe_item_names(strong_model) <= {item.name for item in result.safe_items}
     assert "Peanut Butter Cookie" not in _latest_safe_item_names(strong_model)
+
+
+async def test_menu_lookup_tool_filters_restricted_matches(
+    chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
+) -> None:
+    """Verify that exact menu lookup cannot return unsafe raw matches.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
+    agent, tenant_id, _strong_model = chat_fixture
+    restrictions = CustomerRestrictions(
+        avoid_allergens={AllergenCode.PEANUT},
+        modes=set(),
+        prefer_low_sugar=False,
+    )
+
+    peanut_output = await agent.tools.menu_lookup(
+        MenuLookupInput(
+            tenant_id=tenant_id,
+            query="peanut butter cookie",
+            restrictions=RestrictionsSchema.from_domain(restrictions),
+            limit=5,
+        )
+    )
+    incomplete_output = await agent.tools.menu_lookup(
+        MenuLookupInput(
+            tenant_id=tenant_id,
+            query="turkey pesto panini",
+            restrictions=RestrictionsSchema.from_domain(restrictions),
+            limit=5,
+        )
+    )
+
+    assert {item.name for item in peanut_output.items} == set()
+    assert peanut_output.excluded_count >= 1
+    assert {item.name for item in incomplete_output.items} == set()
+    assert incomplete_output.excluded_count >= 1
 
 
 async def test_fuzzy_request_returns_grounded_menu_item(
