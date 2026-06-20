@@ -20,7 +20,7 @@ The most important rule in this system is simple:
 - [Local Development](#local-development)
 - [Configuration](#configuration)
 - [Database](#database)
-- [Seed Data and Embeddings](#seed-data-and-embeddings)
+- [Catalog Import and Embeddings](#catalog-import-and-embeddings)
 - [API Surface](#api-surface)
 - [Chat Agent Flow](#chat-agent-flow)
 - [Identity and Memory](#identity-and-memory)
@@ -38,7 +38,7 @@ Implemented phases:
 
 | Phase | Area | Status |
 | --- | --- | --- |
-| 0 | FastAPI, config, async SQLAlchemy, Alembic, Postgres/pgvector, Redis, seed data | Implemented |
+| 0 | FastAPI, config, async SQLAlchemy, Alembic, Postgres, Redis, seed data | Implemented |
 | 1 | Deterministic dietary/allergen safety filter | Implemented |
 | 2 | Exact, fuzzy, vector, and hybrid menu retrieval | Implemented |
 | 3 | Streaming chat agent with explicit state machine | Implemented |
@@ -47,9 +47,9 @@ Implemented phases:
 | 6 | Tracing, metrics, eval hard gates, incident replay, CI | Implemented |
 | 7 | Version registry, deploy artifacts, load/chaos tests, runbook | Implemented |
 
-Current default model and embedding providers are deterministic local adapters.
-They are intentionally provider-agnostic and mockable so tests and safety evals
-run without external model calls.
+The production data path uses Postgres/Neon as the relational source of truth
+and Qdrant as the semantic vector index. Tests and safety evals keep providers
+mockable so they run without external model or vector-store calls.
 
 ## Architecture
 
@@ -74,8 +74,11 @@ Deterministic safety filter
   v
 Composer / chat provider
 
-PostgreSQL 16 + pgvector:
-  relational menu source of truth, embeddings, profiles, consent, audit events
+PostgreSQL / Neon:
+  relational menu source of truth, profiles, consent, audit events
+
+Qdrant:
+  semantic vector index for catalog variants and policy chunks
 
 Redis:
   session memory, OTP challenges, rate limits
@@ -89,7 +92,7 @@ Redis:
 | `src/cafe_assistant/config.py` | Environment-driven settings via `pydantic-settings` |
 | `src/cafe_assistant/db/` | SQLAlchemy models, async engine/session, repositories |
 | `src/cafe_assistant/domain/dietary.py` | Pure deterministic allergen and dietary safety filter |
-| `src/cafe_assistant/retrieval/` | Embedding text, pgvector search, keyword search, hybrid fusion |
+| `src/cafe_assistant/retrieval/` | Embedding text, Qdrant/pgvector search, keyword search, hybrid fusion |
 | `src/cafe_assistant/gateway/model_gateway.py` | Mockable embedding and chat provider abstractions |
 | `src/cafe_assistant/agent/` | Router, typed tools, custom FSM, composer, prompts |
 | `src/cafe_assistant/memory/` | Redis session memory, durable profile merge, write gate |
@@ -206,6 +209,9 @@ Copy-Item .env.example .env
 ```
 
 For local development, the default `.env.example` values are enough.
+The default embedding provider is Sentence Transformers using
+`BAAI/bge-small-en-v1.5`; the first embedding run may download the model from
+Hugging Face.
 
 ### 2. Install Dependencies
 
@@ -226,6 +232,10 @@ This starts:
 - PostgreSQL 16 with `pgvector`
 - Redis 7
 
+If `.env` points `DATABASE_URL` at Neon, Docker Postgres is not required.
+Redis is still required for chat/session/rate-limit features unless you point
+`REDIS_URL` at a managed Redis instance.
+
 Check rendered Compose config:
 
 ```bash
@@ -244,17 +254,25 @@ To render SQL without applying it:
 uv run alembic upgrade head --sql
 ```
 
-### 5. Seed Menu Data
+### 5. Import BTB Catalog
 
 ```bash
-uv run python scripts/seed_menu.py
+uv run python scripts/import_btb_documents.py
 ```
+
+This reads the Markdown source documents under `docs/source/by-the-brew/` and
+loads the normalized menu, variants, ingredients, allergen assertions, dietary
+assertions, and policy chunks into Postgres/Neon.
 
 ### 6. Backfill Embeddings
 
 ```bash
-uv run python scripts/embed_menu.py
+uv run python scripts/embed_catalog.py
 ```
+
+With `VECTOR_PROVIDER=qdrant`, this creates or validates the configured Qdrant
+collection and upserts catalog/policy vectors there. Qdrant stores candidate
+IDs and payload metadata only; Postgres/Neon remains the source of truth.
 
 ### 7. Run the API
 
@@ -291,8 +309,17 @@ The app also reads `.env` locally.
 | `ENVIRONMENT` | `local` | Runtime environment label |
 | `DATABASE_URL` | local Postgres URL | Async SQLAlchemy database URL |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
-| `EMBEDDING_PROVIDER` | `hash` | Embedding provider adapter |
-| `EMBEDDING_DIMENSION` | `8` | Embedding vector dimension |
+| `EMBEDDING_PROVIDER` | `sentence_transformer` | Embedding provider adapter |
+| `EMBEDDING_MODEL_NAME` | `BAAI/bge-small-en-v1.5` | Sentence Transformers embedding model |
+| `EMBEDDING_DIMENSION` | `384` | Embedding vector dimension |
+| `VECTOR_PROVIDER` | `qdrant` | Semantic vector index provider |
+| `QDRANT_URL` | empty | Qdrant cluster URL |
+| `QDRANT_ENDPOINT` | empty | Alias for `QDRANT_URL` |
+| `QDRANT_API_KEY` | empty | Qdrant API key |
+| `QDRANT_COLLECTION` | `cafe_assistant_menu_policy` | Qdrant collection for menu and policy vectors |
+| `LLM_PROVIDER` | `openai` | Intended LLM provider label |
+| `LLM_MODEL` | `gpt-4o-mini` | Intended chat model label |
+| `LLM_API_KEY` | empty | Local secret for the real chat provider once enabled |
 | `CHEAP_CHAT_PROVIDER` | `local` | Cheap model path for classification |
 | `STRONG_CHAT_PROVIDER` | `local` | Strong model path for synthesis |
 | `CHAT_TIMEOUT_SECONDS` | `8.0` | Per-provider chat timeout |
@@ -313,7 +340,7 @@ The app also reads `.env` locally.
 | `LANGFUSE_PUBLIC_KEY` | empty | Langfuse public key |
 | `LANGFUSE_SECRET_KEY` | empty | Langfuse secret key |
 | `LANGFUSE_HOST` | Langfuse cloud URL | Langfuse host |
-| `DEFAULT_CHAT_MODEL_NAME` | `local` | Trace label for default model |
+| `DEFAULT_CHAT_MODEL_NAME` | `gpt-4o-mini` | Trace label for default model |
 | `LATENCY_BUDGET_MS` | `1500` | Eval/load latency budget |
 
 Production environments must replace local secrets and should provide
@@ -322,8 +349,9 @@ files.
 
 ## Database
 
-The relational database is the source of truth. The vector store is only an
-index over menu data.
+The relational database is the source of truth. Qdrant is only an index over
+menu and policy data. Search results from Qdrant are treated as candidate IDs;
+the app always reloads the real rows from Postgres/Neon before safety filtering.
 
 Core schema:
 
@@ -345,9 +373,22 @@ Core schema:
 
 Important menu columns:
 
-- `menu_items.embedding`: pgvector embedding for semantic retrieval.
 - `menu_items.allergen_data_complete`: explicit boolean safety flag. If false
   and the customer has allergen avoidance, the item is excluded.
+- `catalog_items.allergen_data_complete`: same safety contract for production
+  catalog rows.
+- `catalog_items.dietary_data_complete`: explicit boolean for dietary-mode
+  completeness.
+
+Vector storage:
+
+- Qdrant collection: `cafe_assistant_menu_policy`
+- Catalog point payload includes `tenant_id`, `source_kind=catalog_item`,
+  `source_id=<catalog_item_variant.id>`, and `menu_version_id`.
+- Policy point payload includes `tenant_id`, `source_kind=policy_chunk`,
+  `source_id=<policy_chunks.id>`, and `policy_document_id`.
+- pgvector columns still exist as a fallback/legacy path, but Qdrant is the
+  configured semantic index when `VECTOR_PROVIDER=qdrant`.
 
 Migration chain:
 
@@ -357,6 +398,8 @@ Migration chain:
 | `20260617_0002_menu_item_embeddings.py` | Menu item embedding column |
 | `20260618_0003_identity_memory.py` | Customer, profile, consent, episodic memory, device token tables |
 | `20260618_0004_security_audit.py` | Append-only audit event table |
+| `20260619_0005_production_catalog.py` | Source docs, catalog, variants, policies, modifiers |
+| `20260619_0006_sentence_transformer_embeddings.py` | 384-dimensional BGE embedding compatibility |
 
 Run migrations:
 
@@ -372,28 +415,70 @@ uv run alembic revision --autogenerate -m "describe change"
 
 Always inspect generated migrations before applying them.
 
-## Seed Data and Embeddings
+## Catalog Import and Embeddings
 
-Seed the deterministic demo menu:
-
-```bash
-uv run python scripts/seed_menu.py
-```
-
-The seed data inserts one tenant, one location, and realistic cafe items such as
-coffees, teas, pastries, and sandwiches. It includes ingredients, allergens,
-dietary tags, sugar, carb data, and intentionally incomplete allergen data for
-some items.
-
-Backfill embeddings:
+Import the production BTB source documents:
 
 ```bash
-uv run python scripts/embed_menu.py
+uv run python scripts/import_btb_documents.py
 ```
 
-Embedding text is built from menu item name, description, and tags. The default
-hash provider is deterministic and local. Real provider adapters can be added
-behind the existing `EmbeddingProvider` protocol.
+The importer reads the Markdown source files, fingerprints the content, and
+loads a versioned catalog into Postgres/Neon. It preserves explicit allergen
+completeness: unknown allergen data stays unknown and is treated as unsafe by
+the safety filter.
+
+Backfill catalog and policy embeddings:
+
+```bash
+uv run python scripts/embed_catalog.py
+```
+
+Embedding text is built from catalog item names, descriptions, variants,
+dietary/allergen metadata, and policy chunks. With the Qdrant provider enabled,
+embeddings are stored in the configured Qdrant collection while Postgres/Neon
+remains the source of truth.
+
+### Import BTB Source Documents
+
+The By The Brew Markdown files live under:
+
+```text
+docs/source/by-the-brew/
+```
+
+Import them into the production catalog substrate:
+
+```bash
+uv run python scripts/import_btb_documents.py
+```
+
+This registers the Markdown files as `source_documents`, creates a
+`menu_import_batch`, builds a versioned published menu, parses item variants,
+ingredients, allergen/dietary assertions, modifiers, and policy chunks, and
+keeps the raw documents traceable by content hash.
+
+To stage without publishing:
+
+```bash
+uv run python scripts/import_btb_documents.py --staged
+```
+
+Backfill embeddings for the published catalog variants and policy chunks:
+
+```bash
+uv run python scripts/embed_catalog.py
+```
+
+For one tenant only:
+
+```bash
+uv run python scripts/embed_catalog.py --tenant-id 1
+```
+
+Production retrieval prefers published catalog variants and their vector index.
+If a tenant has no published catalog yet, retrieval falls back to the legacy
+`menu_items` seed schema.
 
 ## API Surface
 

@@ -1,3 +1,7 @@
+"""Tests for chat latency.
+Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,11 +16,17 @@ from cafe_assistant.agent import state_machine
 from cafe_assistant.api.deps import get_rate_limiter
 from cafe_assistant.db.base import Base
 from cafe_assistant.db.session import get_session
+from cafe_assistant.gateway.model_gateway import (
+    ChatModelCascade,
+    HashEmbeddingProvider,
+    LocalChatProvider,
+)
 from cafe_assistant.main import create_app
 from cafe_assistant.memory.session import InMemorySessionMemory
+from cafe_assistant.retrieval import hybrid
 from cafe_assistant.security.rate_limit import InMemoryRateLimiter
-from scripts.embed_menu import backfill_menu_embeddings
-from scripts.seed_menu import seed_database
+from tests.fixtures.legacy_embeddings import backfill_menu_embeddings
+from tests.fixtures.legacy_menu import seed_database
 
 
 @pytest.mark.load
@@ -24,10 +34,35 @@ async def test_chat_first_token_latency_budget_under_burst(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify that chat first token latency budget under burst.
+
+    Args:
+        tmp_path (Any):
+            Tmp path value required to perform this operation.
+        monkeypatch (pytest.MonkeyPatch):
+            Monkeypatch value required to perform this operation.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     monkeypatch.setattr(
         state_machine,
         "get_redis_session_memory",
         lambda: InMemorySessionMemory(),
+    )
+    monkeypatch.setattr(
+        state_machine,
+        "get_chat_model_cascade",
+        lambda: ChatModelCascade(
+            cheap=LocalChatProvider(),
+            strong=LocalChatProvider(),
+        ),
+    )
+    monkeypatch.setattr(
+        hybrid,
+        "get_embedding_provider",
+        lambda: HashEmbeddingProvider(384),
     )
     db_path = tmp_path / "load.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
@@ -38,7 +73,7 @@ async def test_chat_first_token_latency_budget_under_burst(
     try:
         async with session_factory() as session:
             await seed_database(session)
-            await backfill_menu_embeddings(session)
+            await backfill_menu_embeddings(session, provider=HashEmbeddingProvider(384))
             app = create_app()
             app.dependency_overrides[get_rate_limiter] = lambda: InMemoryRateLimiter(
                 session_limit=1_000,
@@ -46,6 +81,15 @@ async def test_chat_first_token_latency_budget_under_burst(
             )
 
             async def override_get_session() -> AsyncIterator[AsyncSession]:
+                """Handle override get session.
+
+                Args:
+                    None.
+
+                Returns:
+                    AsyncIterator[AsyncSession]:
+                        Streamed values yielded to the caller as they become available.
+                """
                 async with session_factory() as request_session:
                     try:
                         yield request_session
@@ -78,6 +122,18 @@ async def test_chat_first_token_latency_budget_under_burst(
 
 
 async def _first_token_latency_ms(client: AsyncClient, index: int) -> float:
+    """Handle first token latency ms.
+
+    Args:
+        client (AsyncClient):
+            HTTP client used to call the Qdrant API.
+        index (int):
+            Index value required to perform this operation.
+
+    Returns:
+        float:
+            Value produced for the caller according to the function contract.
+    """
     started_at = time.perf_counter()
     async with client.stream(
         "POST",
@@ -95,6 +151,19 @@ async def _first_token_latency_ms(client: AsyncClient, index: int) -> float:
 
 
 def _percentile(values: list[float], percentile: float) -> float:
+    """Handle percentile.
+
+    Args:
+        values (list[float]):
+            Values value required to perform this operation.
+        percentile (float):
+            Percentile value required to perform this operation.
+
+    Returns:
+        float:
+            Value produced for the caller according to the function contract.
+    """
     ordered = sorted(values)
     index = round((len(ordered) - 1) * percentile)
     return ordered[index]
+

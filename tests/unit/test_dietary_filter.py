@@ -1,3 +1,7 @@
+"""Tests for dietary filter.
+Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""
+
 from __future__ import annotations
 
 import json
@@ -14,6 +18,7 @@ from cafe_assistant.db.models import Tenant
 from cafe_assistant.db.repositories.menu_repo import load_menu_item_views_for_tenant
 from cafe_assistant.domain.dietary import (
     EXCLUDED_INCOMPLETE_DATA,
+    EXCLUDED_INCOMPLETE_DIETARY_DATA,
     INCLUDED,
     AllergenCode,
     CustomerRestrictions,
@@ -21,10 +26,20 @@ from cafe_assistant.domain.dietary import (
     MenuItemView,
     filter_safe_items,
 )
-from scripts.seed_menu import TENANT_NAME, seed_database
+from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
 
 
 def _menu_item_from_payload(payload: dict[str, Any]) -> MenuItemView:
+    """Handle menu item from payload.
+
+    Args:
+        payload (dict[str, Any]):
+            JSON-like payload read from an API request, test case, or trace.
+
+    Returns:
+        MenuItemView:
+            Value produced for the caller according to the function contract.
+    """
     return MenuItemView(
         id=payload["id"],
         name=payload["name"],
@@ -43,6 +58,16 @@ ALL_ITEMS_BY_ID = {
 
 
 def _restrictions_from_payload(payload: dict[str, Any]) -> CustomerRestrictions:
+    """Handle restrictions from payload.
+
+    Args:
+        payload (dict[str, Any]):
+            JSON-like payload read from an API request, test case, or trace.
+
+    Returns:
+        CustomerRestrictions:
+            Value produced for the caller according to the function contract.
+    """
     return CustomerRestrictions(
         avoid_allergens={AllergenCode(code) for code in payload["avoid_allergens"]},
         modes={DietaryMode(code) for code in payload["modes"]},
@@ -51,12 +76,32 @@ def _restrictions_from_payload(payload: dict[str, Any]) -> CustomerRestrictions:
 
 
 def _items_for_case(case: dict[str, Any]) -> list[MenuItemView]:
+    """Handle items for case.
+
+    Args:
+        case (dict[str, Any]):
+            Evaluation or test case payload being converted or executed.
+
+    Returns:
+        list[MenuItemView]:
+            Value produced for the caller according to the function contract.
+    """
     item_ids = case.get("item_ids", [item["id"] for item in DATASET["items"]])
     return [ALL_ITEMS_BY_ID[item_id] for item_id in item_ids]
 
 
 @pytest.mark.parametrize("case", DATASET["cases"], ids=lambda case: case["id"])
 def test_labeled_allergen_cases(case: dict[str, Any]) -> None:
+    """Verify that labeled allergen cases.
+
+    Args:
+        case (dict[str, Any]):
+            Evaluation or test case payload being converted or executed.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     items = _items_for_case(case)
     restrictions = _restrictions_from_payload(case["restrictions"])
     expected_safe_ids = case["expected_safe_ids"]
@@ -91,6 +136,15 @@ def test_labeled_allergen_cases(case: dict[str, Any]) -> None:
 
 
 def test_labeled_cases_have_zero_false_negatives() -> None:
+    """Verify that labeled cases have zero false negatives.
+
+    Args:
+        None.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     for case in DATASET["cases"]:
         result = filter_safe_items(
             _items_for_case(case),
@@ -102,6 +156,15 @@ def test_labeled_cases_have_zero_false_negatives() -> None:
 
 
 def test_incomplete_allergen_data_is_excluded_for_any_allergen_avoidance() -> None:
+    """Verify that incomplete allergen data is excluded for any allergen avoidance.
+
+    Args:
+        None.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     incomplete_items = [
         MenuItemView(
             id=101,
@@ -138,7 +201,78 @@ def test_incomplete_allergen_data_is_excluded_for_any_allergen_avoidance() -> No
                 assert result.decisions[0].reason == EXCLUDED_INCOMPLETE_DATA
 
 
+def test_incomplete_dietary_data_is_excluded_for_dietary_modes() -> None:
+    """Verify that incomplete dietary data is excluded for dietary modes.
+
+    Args:
+        None.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
+    item = MenuItemView(
+        id=201,
+        name="Unverified Vegan Muffin",
+        allergen_codes=set(),
+        dietary_tags=set(),
+        allergen_data_complete=True,
+        sugar_grams=12.0,
+        dietary_data_complete=False,
+    )
+
+    result = filter_safe_items(
+        [item],
+        CustomerRestrictions(
+            avoid_allergens=set(),
+            modes={DietaryMode.VEGAN},
+            prefer_low_sugar=False,
+        ),
+    )
+
+    assert result.safe_items == []
+    assert result.decisions[0].reason == EXCLUDED_INCOMPLETE_DIETARY_DATA
+
+
+def test_incomplete_dietary_data_does_not_exclude_without_dietary_modes() -> None:
+    """Verify that incomplete dietary data does not exclude without dietary modes.
+
+    Args:
+        None.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
+    item = MenuItemView(
+        id=202,
+        name="Unverified Snack",
+        allergen_codes=set(),
+        dietary_tags=set(),
+        allergen_data_complete=True,
+        sugar_grams=None,
+        dietary_data_complete=False,
+    )
+
+    result = filter_safe_items(
+        [item],
+        CustomerRestrictions(avoid_allergens=set(), modes=set(), prefer_low_sugar=False),
+    )
+
+    assert result.safe_items == [item]
+    assert result.decisions[0].reason == INCLUDED
+
+
 def test_sugar_preference_never_excludes_items() -> None:
+    """Verify that sugar preference never excludes items.
+
+    Args:
+        None.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     items = _items_for_case({"item_ids": [2, 5, 12, 14]})
     unrestricted = CustomerRestrictions(
         avoid_allergens=set(),
@@ -161,6 +295,15 @@ def test_sugar_preference_never_excludes_items() -> None:
 
 
 async def test_load_menu_item_views_for_tenant_aggregates_seed_data() -> None:
+    """Verify that load menu item views for tenant aggregates seed data.
+
+    Args:
+        None.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
