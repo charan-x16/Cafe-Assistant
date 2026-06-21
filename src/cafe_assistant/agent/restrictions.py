@@ -3,8 +3,9 @@
 This module is deliberately rule-based. The agent can use model routing for
 conversation classification, but allergen and dietary restrictions must be
 extracted deterministically so safety behavior is stable, testable, and biased
-away from false negatives. Current-turn statements override stored session or
-profile facts for the active turn.
+away from false negatives. The extractor returns both active merged restrictions
+for safety filtering and explicit current-turn restrictions for consent-gated
+memory writes.
 """
 
 from __future__ import annotations
@@ -56,9 +57,22 @@ _MEDICAL_PATTERN = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class RestrictionExtraction:
-    """Restrictions and escalation flags extracted from one user message."""
+    """Restrictions and escalation flags extracted from one user message.
+
+    Attributes:
+        restrictions (CustomerRestrictions):
+            Active restrictions after merging stored memory with current-turn
+            additions and negations. This value is used for safety filtering.
+        current_turn_restrictions (CustomerRestrictions):
+            Only positive health/dietary facts explicitly mentioned in the
+            current message. This value is eligible for consent-gated durable
+            persistence and intentionally excludes stored facts.
+        medical_question (bool):
+            True when the user asked for medical advice that the agent should refuse.
+    """
 
     restrictions: CustomerRestrictions
+    current_turn_restrictions: CustomerRestrictions
     medical_question: bool
 
 
@@ -66,7 +80,7 @@ def extract_restrictions(
     message: str,
     stored: CustomerRestrictions | None = None,
 ) -> RestrictionExtraction:
-    """Extract active-turn restrictions from a user message.
+    """Extract active and current-turn restrictions from a user message.
 
     Args:
         message (str):
@@ -79,12 +93,16 @@ def extract_restrictions(
 
     Returns:
         RestrictionExtraction:
-            The merged active restrictions plus a flag indicating whether the
-            message asked for medical advice and should be escalated/refused.
+            Active merged restrictions, explicit current-turn facts for the
+            write-gate, and a medical-escalation flag.
     """
     avoid_allergens = set(stored.avoid_allergens) if stored is not None else set()
     modes = set(stored.modes) if stored is not None else set()
     prefer_low_sugar = stored.prefer_low_sugar if stored is not None else False
+
+    current_avoid_allergens: set[AllergenCode] = set()
+    current_modes: set[DietaryMode] = set()
+    current_prefer_low_sugar = False
 
     for clause in _allergen_clauses(message):
         clause_allergens = {
@@ -103,23 +121,35 @@ def extract_restrictions(
         avoid_allergens.difference_update(negated_allergens)
 
         if _ALLERGY_PATTERN.search(clause):
-            avoid_allergens.update(clause_allergens - negated_allergens)
+            positive_allergens = clause_allergens - negated_allergens
+            avoid_allergens.update(positive_allergens)
+            current_avoid_allergens.update(positive_allergens)
 
     if _VEGAN_PATTERN.search(message):
         modes.add(DietaryMode.VEGAN)
         modes.add(DietaryMode.VEGETARIAN)
+        current_modes.add(DietaryMode.VEGAN)
+        current_modes.add(DietaryMode.VEGETARIAN)
     if _VEGETARIAN_PATTERN.search(message):
         modes.add(DietaryMode.VEGETARIAN)
+        current_modes.add(DietaryMode.VEGETARIAN)
     if _GLUTEN_FREE_PATTERN.search(message):
         modes.add(DietaryMode.GLUTEN_FREE)
+        current_modes.add(DietaryMode.GLUTEN_FREE)
     if _LOW_SUGAR_PATTERN.search(message):
         prefer_low_sugar = True
+        current_prefer_low_sugar = True
 
     return RestrictionExtraction(
         restrictions=CustomerRestrictions(
             avoid_allergens=avoid_allergens,
             modes=modes,
             prefer_low_sugar=prefer_low_sugar,
+        ),
+        current_turn_restrictions=CustomerRestrictions(
+            avoid_allergens=current_avoid_allergens,
+            modes=current_modes,
+            prefer_low_sugar=current_prefer_low_sugar,
         ),
         medical_question=bool(_MEDICAL_PATTERN.search(message)),
     )

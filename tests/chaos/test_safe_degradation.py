@@ -1,5 +1,9 @@
-"""Tests for safe degradation.
-Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""Chaos-style tests for safe degradation paths.
+
+These tests force retriever, allergen-data, and memory failures while using
+seeded menu data and deterministic providers. The expected behavior is always a
+safe fallback: no unsafe recommendation, no failed chat when memory is down, and
+staff-check copy when allergen safety cannot be confirmed.
 """
 
 from __future__ import annotations
@@ -26,48 +30,53 @@ from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
 
 
 class FailingMemory:
-    """Container for failing memory behavior and data."""
-    async def load(self, session_id: str) -> SessionState:
-        """Load the requested value.
+    """Session-memory double that raises on every load and save."""
+    async def load(self, *, tenant_id: int, session_id: str) -> SessionState:
+        """Raise when the agent attempts to load session memory.
 
         Args:
+            tenant_id (int):
+                Tenant scope supplied by the agent.
             session_id (str):
-                Session id value required to perform this operation.
+                Session identifier supplied by the agent.
 
         Returns:
             SessionState:
-                Value produced for the caller according to the function contract.
+                This fake never returns; it raises to simulate unavailable memory.
         """
-        del session_id
+        del tenant_id, session_id
         raise RuntimeError("memory unavailable")
 
-    async def save(self, session_id: str, state: SessionState) -> None:
-        """Handle save.
+    async def save(self, *, tenant_id: int, session_id: str, state: SessionState) -> None:
+        """Raise when the agent attempts to save session memory.
 
         Args:
+            tenant_id (int):
+                Tenant scope supplied by the agent.
             session_id (str):
-                Session id value required to perform this operation.
+                Session identifier supplied by the agent.
             state (SessionState):
-                State value required to perform this operation.
+                Session state the agent attempted to persist.
 
         Returns:
             None:
-                No value is returned; the function completes through side effects or validation.
+                This fake never saves; it raises to simulate unavailable memory.
         """
-        del session_id, state
+        del tenant_id, session_id, state
         raise RuntimeError("memory unavailable")
 
 
 @pytest.fixture
 async def chaos_agent() -> AsyncIterator[tuple[ChatAgent, int]]:
-    """Handle chaos agent.
+    """Create a seeded chat agent for safe-degradation tests.
 
     Args:
-        None.
+        None:
+            Pytest manages fixture setup and teardown.
 
     Returns:
         AsyncIterator[tuple[ChatAgent, int]]:
-            Streamed values yielded to the caller as they become available.
+            Chat agent and tenant ID seeded with deterministic menu embeddings.
     """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -107,7 +116,7 @@ async def test_recommender_failure_falls_back_to_safe_menu_items(
 
     Args:
         chaos_agent (tuple[ChatAgent, int]):
-            Chaos agent value required to perform this operation.
+            Seeded chat agent and tenant ID used by safe-degradation tests.
 
     Returns:
         None:
@@ -116,15 +125,15 @@ async def test_recommender_failure_falls_back_to_safe_menu_items(
     agent, tenant_id = chaos_agent
 
     async def fail_search(input_model: BaseModel) -> BaseModel:
-        """Handle fail search.
+        """Raise from primary search so fallback retrieval is exercised.
 
         Args:
             input_model (BaseModel):
-                Input model value required to perform this operation.
+                Tool input supplied by the registry. The fake ignores it.
 
         Returns:
             BaseModel:
-                Value produced for the caller according to the function contract.
+                This fake never returns; it raises a retriever failure.
         """
         del input_model
         raise RuntimeError("retriever down")
@@ -150,7 +159,7 @@ async def test_allergen_data_unavailable_uses_staff_check_fallback(
 
     Args:
         chaos_agent (tuple[ChatAgent, int]):
-            Chaos agent value required to perform this operation.
+            Seeded chat agent and tenant ID used by safe-degradation tests.
 
     Returns:
         None:
@@ -179,7 +188,7 @@ async def test_memory_unavailable_degrades_to_anonymous_session(
 
     Args:
         chaos_agent (tuple[ChatAgent, int]):
-            Chaos agent value required to perform this operation.
+            Seeded chat agent and tenant ID used by safe-degradation tests.
 
     Returns:
         None:

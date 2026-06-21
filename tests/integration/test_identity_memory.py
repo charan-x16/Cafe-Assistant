@@ -1,5 +1,8 @@
-"""Tests for identity memory.
-Exercises expected behavior with deterministic fixtures and mocked providers where needed.
+"""Integration tests for identity, durable profile, and session memory.
+
+The suite uses deterministic fake providers and an in-memory database to verify
+anonymous sessions, tenant-scoped session memory, OTP consent upgrades, durable
+profile reads/writes, current-turn overrides, and deletion behavior.
 """
 
 from __future__ import annotations
@@ -10,12 +13,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from cafe_assistant.agent.state_machine import AgentConfig, AgentState, ChatAgent, ChatAgentRequest
 from cafe_assistant.db.base import Base
-from cafe_assistant.db.models import Location, Tenant
+from cafe_assistant.db.models import EpisodicEvent, Location, Tenant
 from cafe_assistant.db.repositories.consent_repo import DIETARY_HEALTH_SCOPE, grant_consent
 from cafe_assistant.db.repositories.profile_repo import (
     delete_customer_profile,
@@ -33,32 +36,36 @@ from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
 
 
 class FakeEmbeddingProvider:
-    """Container for fake embedding provider behavior and data."""
+    """Deterministic embedding provider used by identity-memory chat tests.
+
+    The provider maps recognizable menu vocabulary to stable vectors so tests
+    can exercise retrieval without external model calls.
+    """
     dimensions = 384
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed the requested value.
+        """Embed each text with the deterministic test vectorizer.
 
         Args:
             texts (list[str]):
-                Input texts that should each receive one embedding vector.
+                Query or menu texts that should each receive one embedding vector.
 
         Returns:
             list[list[float]]:
-                Value produced for the caller according to the function contract.
+                One fixed-width vector per input text, in the same order.
         """
         return [self._embed_one(text) for text in texts]
 
     def _embed_one(self, text: str) -> list[float]:
-        """Embed one.
+        """Embed one text by counting known menu vocabulary groups.
 
         Args:
             text (str):
-                Input text to normalize, embed, tokenize, or classify.
+                Query or menu text to tokenize and convert into feature counts.
 
         Returns:
             list[float]:
-                Value produced for the caller according to the function contract.
+                Normalized and padded embedding vector for the supplied text.
         """
         tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
         vector = [
@@ -77,53 +84,53 @@ class FakeEmbeddingProvider:
         return self._pad([component / magnitude for component in vector])
 
     def _feature(self, tokens: set[str], vocabulary: set[str]) -> float:
-        """Handle feature.
+        """Count how many recognized vocabulary terms appear in the text.
 
         Args:
             tokens (set[str]):
-                Tokens value required to perform this operation.
+                Lowercase tokens extracted from one input text.
             vocabulary (set[str]):
-                Vocabulary value required to perform this operation.
+                Menu-topic terms represented by one vector dimension.
 
         Returns:
             float:
-                Value produced for the caller according to the function contract.
+                Count of matching tokens as a numeric feature value.
         """
         return float(len(tokens & vocabulary))
 
     def _pad(self, vector: list[float]) -> list[float]:
-        """Handle pad.
+        """Pad a short feature vector to the configured embedding dimension.
 
         Args:
             vector (list[float]):
-                Vector being normalized, converted, or sent to the vector store.
+                Normalized feature values produced for one text.
 
         Returns:
             list[float]:
-                Value produced for the caller according to the function contract.
+                Vector extended with zeros to match the fake provider dimension.
         """
         return vector + [0.0] * (self.dimensions - len(vector))
 
 
 class CapturingChatProvider:
-    """Container for capturing chat provider behavior and data."""
+    """Chat provider double that streams responses from supplied safe items."""
     async def stream_chat(
         self,
         messages: list[ChatMessage],
         *,
         timeout_seconds: float,
     ) -> AsyncIterator[str]:
-        """Handle stream chat.
+        """Stream deterministic text naming only `SAFE_ITEM` prompt entries.
 
         Args:
             messages (list[ChatMessage]):
-                Ordered chat messages sent to the configured chat provider.
+                Ordered chat messages built by the composer.
             timeout_seconds (float):
-                Maximum time allowed for the streaming chat request.
+                Maximum time allowed for streaming; accepted but unused by the fake.
 
         Returns:
             AsyncIterator[str]:
-                Streamed values yielded to the caller as they become available.
+                Response chunks grounded in safe item names from the prompt.
         """
         del timeout_seconds
         item_names = [
@@ -142,38 +149,39 @@ class CapturingChatProvider:
 
 
 class CapturingSmsSender:
-    """Container for capturing sms sender behavior and data."""
+    """SMS sender double that captures OTP codes for confirmation tests."""
     def __init__(self) -> None:
-        """Initialize the object with the dependencies or values required later.
+        """Initialize an empty list of sent OTP messages.
 
         Args:
-            None.
+            None:
+                The fake sender has no external dependencies.
 
         Returns:
             None:
-                No value is returned; the function completes through side effects or validation.
+                The `sent` list is ready for assertions.
         """
         self.sent: list[tuple[str, str]] = []
 
     async def send_otp(self, phone: str, code: str) -> None:
-        """Handle send OTP.
+        """Capture an OTP send request for test confirmation.
 
         Args:
             phone (str):
-                Phone value required to perform this operation.
+                Normalized destination phone number.
             code (str):
-                Code value required to perform this operation.
+                One-time code generated by the OTP service.
 
         Returns:
             None:
-                No value is returned; the function completes through side effects or validation.
+                The phone/code pair is appended to the capture list.
         """
         self.sent.append((phone, code))
 
 
 @dataclass(slots=True)
 class IdentityFixture:
-    """Container for identity fixture behavior and data."""
+    """Seeded identity-memory fixture values shared by integration tests."""
     session: AsyncSession
     tenant_id: int
     other_tenant_id: int
@@ -183,14 +191,15 @@ class IdentityFixture:
 
 @pytest.fixture
 async def identity_fixture() -> AsyncIterator[IdentityFixture]:
-    """Handle identity fixture.
+    """Create a seeded identity-memory fixture with two tenants.
 
     Args:
-        None.
+        None:
+            Pytest manages fixture setup and teardown.
 
     Returns:
         AsyncIterator[IdentityFixture]:
-            Streamed values yielded to the caller as they become available.
+            Database session, tenant IDs, chat agent, and tenant-scoped session memory.
     """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -242,7 +251,7 @@ async def test_anonymous_chat_flow_remains_functional(
 
     Args:
         identity_fixture (IdentityFixture):
-            Identity fixture value required to perform this operation.
+            Seeded fixture containing tenants, database session, memory, and chat agent.
 
     Returns:
         None:
@@ -268,7 +277,7 @@ async def test_device_recognition_loads_profile_restrictions(
 
     Args:
         identity_fixture (IdentityFixture):
-            Identity fixture value required to perform this operation.
+            Seeded fixture containing tenants, database session, memory, and chat agent.
 
     Returns:
         None:
@@ -297,7 +306,7 @@ async def test_health_facts_are_gated_until_otp_consent(
 
     Args:
         identity_fixture (IdentityFixture):
-            Identity fixture value required to perform this operation.
+            Seeded fixture containing tenants, database session, memory, and chat agent.
 
     Returns:
         None:
@@ -331,7 +340,11 @@ async def test_health_facts_are_gated_until_otp_consent(
             modes=set(),
         )
     )
-    await identity_fixture.memory.save("otp-session", otp_memory)
+    await identity_fixture.memory.save(
+        tenant_id=tenant_id,
+        session_id="otp-session",
+        state=otp_memory,
+    )
     sms_sender = CapturingSmsSender()
     otp_service = OtpService(sender=sms_sender)
 
@@ -344,7 +357,10 @@ async def test_health_facts_are_gated_until_otp_consent(
         phone="+15555550101",
         challenge_id=start.challenge_id,
         code=code,
-        session_state=await identity_fixture.memory.load("otp-session"),
+        session_state=await identity_fixture.memory.load(
+            tenant_id=tenant_id,
+            session_id="otp-session",
+        ),
     )
 
     consented_profile = await load_stored_profile(
@@ -357,6 +373,196 @@ async def test_health_facts_are_gated_until_otp_consent(
     assert DIETARY_HEALTH_SCOPE in confirmed.granted_scopes
 
 
+async def test_session_memory_is_tenant_scoped_for_same_session_id(
+    identity_fixture: IdentityFixture,
+) -> None:
+    """Verify same session IDs do not share memory across tenants.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Seeded identity fixture with one primary tenant and one second tenant.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    shared_session_id = "shared-browser-session"
+
+    await identity_fixture.agent.run(
+        ChatAgentRequest(
+            session_id=shared_session_id,
+            tenant_id=identity_fixture.tenant_id,
+            message="I'm allergic to peanuts.",
+        )
+    )
+
+    primary_state = await identity_fixture.memory.load(
+        tenant_id=identity_fixture.tenant_id,
+        session_id=shared_session_id,
+    )
+    other_state = await identity_fixture.memory.load(
+        tenant_id=identity_fixture.other_tenant_id,
+        session_id=shared_session_id,
+    )
+    other_result = await identity_fixture.agent.run(
+        ChatAgentRequest(
+            session_id=shared_session_id,
+            tenant_id=identity_fixture.other_tenant_id,
+            message="Recommend a latte.",
+        )
+    )
+
+    assert AllergenCode.PEANUT in primary_state.restrictions.avoid_allergens
+    assert AllergenCode.PEANUT not in other_state.restrictions.avoid_allergens
+    assert AllergenCode.PEANUT not in other_result.restrictions.avoid_allergens
+
+
+async def test_otp_upgrade_uses_tenant_scoped_session_memory(
+    identity_fixture: IdentityFixture,
+) -> None:
+    """Verify OTP upgrade cannot import another tenant's pending session facts.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Seeded identity fixture with isolated tenant-scoped session memory.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    shared_session_id = "shared-otp-session"
+    await identity_fixture.memory.save(
+        tenant_id=identity_fixture.tenant_id,
+        session_id=shared_session_id,
+        state=SessionState(
+            restrictions=CustomerRestrictions(
+                avoid_allergens={AllergenCode.PEANUT},
+                modes=set(),
+            )
+        ),
+    )
+
+    other_tenant_state = await identity_fixture.memory.load(
+        tenant_id=identity_fixture.other_tenant_id,
+        session_id=shared_session_id,
+    )
+    sms_sender = CapturingSmsSender()
+    otp_service = OtpService(sender=sms_sender)
+    start = await otp_service.start(
+        tenant_id=identity_fixture.other_tenant_id,
+        phone="+15555550177",
+    )
+    _sent_phone, code = sms_sender.sent[-1]
+    confirmed = await otp_service.confirm(
+        identity_fixture.session,
+        tenant_id=identity_fixture.other_tenant_id,
+        phone="+15555550177",
+        challenge_id=start.challenge_id,
+        code=code,
+        session_state=other_tenant_state,
+    )
+
+    profile = await load_stored_profile(
+        identity_fixture.session,
+        tenant_id=identity_fixture.other_tenant_id,
+        customer_id=confirmed.customer_id,
+    )
+
+    assert profile is not None
+    assert profile.dietary_facts == {}
+
+
+async def test_write_gate_does_not_persist_merged_profile_facts_on_unrelated_turn(
+    identity_fixture: IdentityFixture,
+) -> None:
+    """Verify durable writes use explicit current-turn facts, not merged memory.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Seeded identity fixture with a consented peanut-allergic profile.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    token = await _create_consented_customer_with_peanut_profile(identity_fixture)
+    identity = await verify_device_token(
+        identity_fixture.session,
+        tenant_id=identity_fixture.tenant_id,
+        token=token,
+    )
+    assert identity is not None
+    before_count = await identity_fixture.session.scalar(
+        select(func.count())
+        .select_from(EpisodicEvent)
+        .where(
+            EpisodicEvent.customer_id == identity.customer_id,
+            EpisodicEvent.type == "dietary_facts_saved",
+        )
+    )
+
+    result = await identity_fixture.agent.run(
+        ChatAgentRequest(
+            session_id="profile-fact-not-rewritten",
+            tenant_id=identity_fixture.tenant_id,
+            device_token=token,
+            message="Recommend a latte.",
+        )
+    )
+
+    after_count = await identity_fixture.session.scalar(
+        select(func.count())
+        .select_from(EpisodicEvent)
+        .where(
+            EpisodicEvent.customer_id == identity.customer_id,
+            EpisodicEvent.type == "dietary_facts_saved",
+        )
+    )
+
+    assert AgentState.COMPLETE in result.state_history
+    assert AllergenCode.PEANUT in result.restrictions.avoid_allergens
+    assert after_count == before_count
+
+
+async def test_anonymous_session_preference_is_reused_without_profile(
+    identity_fixture: IdentityFixture,
+) -> None:
+    """Verify anonymous session preferences are remembered during the visit.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Seeded identity fixture with in-memory session storage.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    session_id = "anonymous-oat-session"
+
+    await identity_fixture.agent.run(
+        ChatAgentRequest(
+            session_id=session_id,
+            tenant_id=identity_fixture.tenant_id,
+            message="I prefer oat milk.",
+        )
+    )
+    stored_state = await identity_fixture.memory.load(
+        tenant_id=identity_fixture.tenant_id,
+        session_id=session_id,
+    )
+    result = await identity_fixture.agent.run(
+        ChatAgentRequest(
+            session_id=session_id,
+            tenant_id=identity_fixture.tenant_id,
+            message="Recommend a latte.",
+        )
+    )
+    model_context = "\n".join(message.content for message in result.model_messages)
+
+    assert result.customer_id is None
+    assert stored_state.preferences["milk_preference"] == "oat milk"
+    assert "oat milk" in model_context
+
 async def test_current_turn_override_beats_stored_profile_for_that_turn(
     identity_fixture: IdentityFixture,
 ) -> None:
@@ -364,7 +570,7 @@ async def test_current_turn_override_beats_stored_profile_for_that_turn(
 
     Args:
         identity_fixture (IdentityFixture):
-            Identity fixture value required to perform this operation.
+            Seeded fixture containing tenants, database session, memory, and chat agent.
 
     Returns:
         None:
@@ -392,7 +598,7 @@ async def test_profile_deletion_removes_device_access(
 
     Args:
         identity_fixture (IdentityFixture):
-            Identity fixture value required to perform this operation.
+            Seeded fixture containing tenants, database session, memory, and chat agent.
 
     Returns:
         None:
@@ -428,7 +634,7 @@ async def test_cross_tenant_access_is_blocked(
 
     Args:
         identity_fixture (IdentityFixture):
-            Identity fixture value required to perform this operation.
+            Seeded fixture containing tenants, database session, memory, and chat agent.
 
     Returns:
         None:
@@ -460,15 +666,15 @@ async def test_cross_tenant_access_is_blocked(
 async def _create_consented_customer_with_peanut_profile(
     fixture: IdentityFixture,
 ) -> str:
-    """Create consented customer with peanut profile.
+    """Create a recognized customer with consented peanut allergy facts.
 
     Args:
         fixture (IdentityFixture):
-            Fixture value required to perform this operation.
+            Seeded identity-memory fixture used to create the profile.
 
-    Returns:
-        str:
-            Value produced for the caller according to the function contract.
+        Returns:
+            str:
+                Device token linked to the consented profile.
     """
     customer = await get_or_create_customer_by_phone(
         fixture.session,
@@ -496,16 +702,16 @@ async def _create_consented_customer_with_peanut_profile(
 
 
 def _chunks(text: str, chunk_size: int = 12) -> list[str]:
-    """Handle chunks.
+    """Split fake model output into deterministic streaming chunks.
 
     Args:
         text (str):
-            Input text to normalize, embed, tokenize, or classify.
+            Full fake response text to stream back to the caller.
         chunk_size (int):
-            Chunk size value required to perform this operation.
+            Maximum number of characters per emitted chunk.
 
-    Returns:
-        list[str]:
-            Value produced for the caller according to the function contract.
+        Returns:
+            list[str]:
+                Ordered chunks that reconstruct `text` when joined.
     """
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]

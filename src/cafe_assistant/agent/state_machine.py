@@ -45,7 +45,11 @@ from cafe_assistant.memory.session import (
     append_turns,
     get_redis_session_memory,
 )
-from cafe_assistant.memory.write_gate import classify_candidate_writes, persist_allowed_writes
+from cafe_assistant.memory.write_gate import (
+    classify_candidate_writes,
+    extract_preferences,
+    persist_allowed_writes,
+)
 from cafe_assistant.observability.metrics import record_quality_event
 from cafe_assistant.observability.tracing import span, start_trace
 from cafe_assistant.security.audit import AuditContext, append_audit_event
@@ -135,6 +139,8 @@ class _PreparedResponse:
     response: str | None
     safe_items: list[MenuItemView]
     restrictions: CustomerRestrictions
+    current_turn_restrictions: CustomerRestrictions
+    current_turn_preferences: dict[str, object]
     preferences: dict[str, object]
     state_history: list[AgentState]
     medical_disclaimer: bool
@@ -251,6 +257,8 @@ class ChatAgent:
                         prepared.restrictions,
                         prepared.response,
                         customer_id=prepared.customer_id,
+                        current_turn_restrictions=prepared.current_turn_restrictions,
+                        current_turn_preferences=prepared.current_turn_preferences,
                     )
                     await self._audit_recommendation(request, prepared)
                     return ChatAgentResult(
@@ -278,6 +286,8 @@ class ChatAgent:
                     prepared.restrictions,
                     response,
                     customer_id=prepared.customer_id,
+                    current_turn_restrictions=prepared.current_turn_restrictions,
+                    current_turn_preferences=prepared.current_turn_preferences,
                 )
                 await self._audit_recommendation(request, prepared)
                 return ChatAgentResult(
@@ -319,6 +329,8 @@ class ChatAgent:
                     prepared.restrictions,
                     prepared.response,
                     customer_id=prepared.customer_id,
+                    current_turn_restrictions=prepared.current_turn_restrictions,
+                    current_turn_preferences=prepared.current_turn_preferences,
                 )
                 await self._audit_recommendation(request, prepared)
                 return
@@ -341,6 +353,8 @@ class ChatAgent:
                 prepared.restrictions,
                 "".join(chunks),
                 customer_id=prepared.customer_id,
+                current_turn_restrictions=prepared.current_turn_restrictions,
+                current_turn_preferences=prepared.current_turn_preferences,
             )
             await self._audit_recommendation(request, prepared)
         except Exception:
@@ -369,7 +383,10 @@ class ChatAgent:
         controls = _RunControls(deadline_at=deadline_at)
 
         try:
-            session_state = await self.memory.load(request.session_id)
+            session_state = await self.memory.load(
+                tenant_id=request.tenant_id,
+                session_id=request.session_id,
+            )
         except Exception:
             record_quality_event("memory_unavailable_total")
             session_state = SessionState()
@@ -387,7 +404,12 @@ class ChatAgent:
             request.message,
             memory_context.session_state.restrictions,
         )
-        search_query = _query_with_preferences(request.message, memory_context.preferences)
+        current_turn_preferences = extract_preferences(request.message)
+        active_preferences = {
+            **memory_context.preferences,
+            **current_turn_preferences,
+        }
+        search_query = _query_with_preferences(request.message, active_preferences)
 
         self._ensure_deadline(deadline_at)
         classification = await self._run_with_deadline(
@@ -406,7 +428,9 @@ class ChatAgent:
                 response=response,
                 safe_items=[],
                 restrictions=extraction.restrictions,
-                preferences=memory_context.preferences,
+                current_turn_restrictions=extraction.current_turn_restrictions,
+                current_turn_preferences=current_turn_preferences,
+                preferences=active_preferences,
                 state_history=[*state_history, AgentState.ESCALATED],
                 medical_disclaimer=True,
                 tool_calls=controls.tool_calls,
@@ -419,7 +443,9 @@ class ChatAgent:
                 response=response,
                 safe_items=[],
                 restrictions=extraction.restrictions,
-                preferences=memory_context.preferences,
+                current_turn_restrictions=extraction.current_turn_restrictions,
+                current_turn_preferences=current_turn_preferences,
+                preferences=active_preferences,
                 state_history=[*state_history, AgentState.COMPLETE],
                 medical_disclaimer=False,
                 tool_calls=controls.tool_calls,
@@ -444,7 +470,9 @@ class ChatAgent:
                 response=response,
                 safe_items=[],
                 restrictions=extraction.restrictions,
-                preferences=memory_context.preferences,
+                current_turn_restrictions=extraction.current_turn_restrictions,
+                current_turn_preferences=current_turn_preferences,
+                preferences=active_preferences,
                 state_history=[*state_history, AgentState.FILTERING, AgentState.COMPLETE],
                 medical_disclaimer=False,
                 tool_calls=controls.tool_calls,
@@ -478,7 +506,9 @@ class ChatAgent:
                 response=response,
                 safe_items=[],
                 restrictions=extraction.restrictions,
-                preferences=memory_context.preferences,
+                current_turn_restrictions=extraction.current_turn_restrictions,
+                current_turn_preferences=current_turn_preferences,
+                preferences=active_preferences,
                 state_history=[*state_history, AgentState.COMPLETE],
                 medical_disclaimer=False,
                 tool_calls=controls.tool_calls,
@@ -492,7 +522,9 @@ class ChatAgent:
             response=None,
             safe_items=recommended_items,
             restrictions=extraction.restrictions,
-            preferences=memory_context.preferences,
+            current_turn_restrictions=extraction.current_turn_restrictions,
+            current_turn_preferences=current_turn_preferences,
+            preferences=active_preferences,
             state_history=state_history,
             medical_disclaimer=False,
             tool_calls=controls.tool_calls,
@@ -675,6 +707,8 @@ class ChatAgent:
         response: str,
         *,
         customer_id: int | None,
+        current_turn_restrictions: CustomerRestrictions,
+        current_turn_preferences: dict[str, object],
     ) -> None:
         """Persist recent session turns and allowed durable memory writes.
 
@@ -687,6 +721,10 @@ class ChatAgent:
                 Assistant response text to append to session memory.
             customer_id (int | None):
                 Durable customer ID when the session is recognized and tenant-scoped.
+            current_turn_restrictions (CustomerRestrictions):
+                Positive health/dietary facts explicitly stated in the current turn.
+            current_turn_preferences (dict[str, object]):
+                Non-health preferences explicitly stated in the current turn.
 
         Returns:
             None:
@@ -694,17 +732,25 @@ class ChatAgent:
                 backing stores are available.
         """
         try:
-            current_state = await self.memory.load(request.session_id)
+            current_state = await self.memory.load(
+                tenant_id=request.tenant_id,
+                session_id=request.session_id,
+            )
         except Exception:
             current_state = SessionState()
         state = SessionState(
             restrictions=restrictions,
+            preferences={
+                **current_state.preferences,
+                **current_turn_preferences,
+            },
             recent_turns=current_state.recent_turns,
         )
         try:
             await self.memory.save(
-                request.session_id,
-                append_turns(state, request.message, response),
+                tenant_id=request.tenant_id,
+                session_id=request.session_id,
+                state=append_turns(state, request.message, response),
             )
         except Exception:
             record_quality_event("memory_unavailable_total")
@@ -713,7 +759,8 @@ class ChatAgent:
 
         writes = classify_candidate_writes(
             message=request.message,
-            restrictions=restrictions,
+            current_turn_restrictions=current_turn_restrictions,
+            current_turn_preferences=current_turn_preferences,
         )
         if writes:
             result = await persist_allowed_writes(
