@@ -16,7 +16,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,11 +29,12 @@ from cafe_assistant.db.repositories.consent_repo import (
 from cafe_assistant.db.repositories.profile_repo import (
     append_event,
     get_or_create_customer_by_phone,
-    update_dietary_facts,
 )
 from cafe_assistant.domain.dietary import CustomerRestrictions
 from cafe_assistant.identity.device import issue_device_token
-from cafe_assistant.memory.session import SessionState
+
+if TYPE_CHECKING:
+    from cafe_assistant.memory.session import SessionState
 
 _GENERIC_OTP_CONFIRM_ERROR = "OTP challenge could not be confirmed."
 _LOCAL_ENVIRONMENTS = frozenset({"local", "test", "development"})
@@ -419,26 +420,19 @@ class OtpService:
         if session_state is not None and DIETARY_HEALTH_SCOPE in granted_scopes:
             facts = restrictions_to_dietary_facts(session_state.restrictions)
             if facts:
-                await update_dietary_facts(
+                await append_event(
                     session,
-                    tenant_id=tenant_id,
                     customer_id=customer.id,
-                    updates=facts,
+                    event_type="dietary_facts_from_session",
+                    data=facts,
                 )
 
-        await append_event(
-            session,
-            tenant_id=tenant_id,
-            customer_id=customer.id,
-            event_type="otp_upgrade",
-            payload={"granted_scopes": list(granted_scopes)},
-        )
         device_token = await issue_device_token(
             session,
             tenant_id=tenant_id,
             customer_id=customer.id,
         )
-        await session.flush()
+        await session.commit()
         return OtpConfirmResult(
             customer_id=customer.id,
             tenant_id=tenant_id,

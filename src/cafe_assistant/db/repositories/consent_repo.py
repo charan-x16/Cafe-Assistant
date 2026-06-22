@@ -121,7 +121,10 @@ async def revoke_all_consents(
         return False
 
     consents = await session.scalars(
-        select(Consent).where(Consent.customer_id == customer_id, Consent.revoked_at.is_(None))
+        select(Consent).where(
+            Consent.customer_id == customer_id,
+            Consent.revoked_at.is_(None),
+        )
     )
     revoked_at = _utcnow()
     for consent in consents:
