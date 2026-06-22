@@ -97,3 +97,18 @@ def test_allergy_list_still_applies_to_multiple_allergens() -> None:
         AllergenCode.TREE_NUT,
         AllergenCode.DAIRY,
     }
+
+def test_cannot_eat_phrase_marks_allergen_avoidance() -> None:
+    """Verify food-intolerance wording still activates allergen avoidance.
+
+    Args:
+        None:
+            The test builds its own message and expected allergen set.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    assert _codes("I cannot eat gluten. Can I have classic garlic bread?") == {
+        AllergenCode.GLUTEN
+    }

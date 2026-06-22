@@ -756,10 +756,16 @@ The evaluation suite contains realistic and adversarial cases:
 - relevance checks
 - latency budget checks
 
-Run all evals:
+Run all evals across the legacy safety fixture and imported BTB catalog:
 
 ```bash
 uv run python evals/run_evals.py
+```
+
+Run release-strict evals, where any family failure exits non-zero:
+
+```bash
+uv run python evals/run_evals.py --strict
 ```
 
 Run the hard allergen-safety gate only:
@@ -768,7 +774,16 @@ Run the hard allergen-safety gate only:
 uv run python evals/allergen_safety.py
 ```
 
-The allergen safety gate fails if false negatives are greater than zero.
+For quick local debugging against only the compact legacy dataset:
+
+```bash
+uv run python evals/run_evals.py --legacy-only
+```
+
+The allergen safety gate fails if false negatives are greater than zero. The
+empty-safe-set family also verifies that cases labeled as having no confirmable
+safe option return no structured items and no menu item recommendations in the
+response text.
 
 ## Testing and Quality Gates
 
@@ -807,7 +822,7 @@ Expected release checks:
 ```bash
 uv run ruff check . --no-cache
 uv run pytest -q
-uv run python evals/run_evals.py
+uv run python evals/run_evals.py --strict
 uv run alembic upgrade head --sql
 docker compose config
 ```

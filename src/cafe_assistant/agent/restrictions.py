@@ -38,7 +38,8 @@ _NEGATED_ALLERGEN_PATTERNS = {
     for allergen, term_pattern in _ALLERGEN_TERMS.items()
 }
 _ALLERGY_PATTERN = re.compile(
-    r"\b(allergic|allergy|allergies|avoid|can't have|cannot have|without)\b",
+    r"\b(allergic|allergy|allergies|avoid|can't have|cannot have|can't eat|"
+    r"cannot eat|can not eat|without)\b",
     re.IGNORECASE,
 )
 _LOW_SUGAR_PATTERN = re.compile(

@@ -67,10 +67,10 @@ lines and that unsafe/allergen-incomplete items were excluded before composing.
 4. Re-run the eval gate locally:
 
 ```bash
-uv run python evals/run_evals.py
+uv run python evals/run_evals.py --strict
 ```
 
-5. If allergen false negatives are nonzero, freeze rollout and roll back.
+5. If allergen false negatives are nonzero, freeze rollout and roll back. If strict mode reports another family failure, keep the rollout frozen until the failing dataset is understood or relabeled.
 
 ## Rollback
 
@@ -149,8 +149,8 @@ deploy/rollback.sh
   below 2.5 seconds in the CI load smoke.
 - Lint: `uv run ruff check . --no-cache`
   Acceptance: exits zero.
-- Safety evals: `uv run python evals/run_evals.py`
-  Acceptance: allergen false-negative count is exactly zero; other families pass.
+- Safety evals: `uv run python evals/run_evals.py --strict`
+  Acceptance: allergen false-negative count is exactly zero; empty-safe-set, groundedness, relevance, medical-refusal, and latency families all pass.
 - Standalone hard gate: `uv run python evals/allergen_safety.py`
   Acceptance: exits zero with `false_negative_count=0`.
 - Compose validation: `docker compose config` and
