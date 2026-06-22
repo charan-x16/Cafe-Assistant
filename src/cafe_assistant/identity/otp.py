@@ -447,6 +447,18 @@ class OtpService:
             device_token=device_token,
             granted_scopes=granted_scopes,
         )
+    async def delete_challenge(self, challenge_id: str) -> None:
+        """Delete a pending OTP challenge when a data-rights request supplies it.
+
+        Args:
+            challenge_id (str):
+                Opaque challenge ID previously returned by the OTP start endpoint.
+
+        Returns:
+            None:
+                The underlying challenge store receives a delete; missing challenges are ignored.
+        """
+        await self.store.delete(challenge_id)
 
     async def _record_failed_attempt(
         self,

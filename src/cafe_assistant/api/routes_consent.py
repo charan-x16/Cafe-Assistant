@@ -4,7 +4,7 @@ These endpoints support the anonymous-to-remembered customer upgrade flow. OTP
 confirmation can attach consent-gated health facts from tenant-scoped session
 memory, profile reads are available only through a tenant-matched device token
 sent by approved transports, and deletion removes durable customer memory
-through repository cascade paths.
+through repository cascade paths while clearing available browser/session state.
 """
 
 from __future__ import annotations
@@ -301,16 +301,22 @@ async def get_profile(
 
 @router.delete("/profile")
 async def delete_profile(
+    response: Response,
     session: SessionDependency,
     context: RequestContextDependency,
     _rate_limited: RateLimitDependency,
     device_token: DeviceTokenDependency,
+    otp_service: OtpServiceDependency,
     tenant_id: int | None = Query(default=None),
     qr_payload: str | None = Query(default=None),
+    session_id: str | None = Query(default=None),
+    challenge_id: str | None = Query(default=None),
 ) -> DeleteProfileResponse:
     """Delete a recognized customer's tenant-scoped durable profile.
 
     Args:
+        response (Response):
+            FastAPI response used to clear the browser-held device-token cookie.
         session (AsyncSession):
             Async database session used for deletion and audit write.
         context (RequestContext):
@@ -319,16 +325,23 @@ async def delete_profile(
             Dependency marker confirming rate-limit checks have run.
         device_token (str | None):
             Opaque browser token from Authorization header or secure cookie.
+        otp_service (OtpService):
+            OTP service used to delete an optional pending challenge.
         tenant_id (int | None):
             Query tenant ID consumed by request-context resolution.
         qr_payload (str | None):
             Query QR payload consumed by request-context resolution.
+        session_id (str | None):
+            Optional session key to purge from tenant-scoped Redis memory.
+        challenge_id (str | None):
+            Optional pending OTP challenge to delete from the challenge store.
 
     Returns:
         DeleteProfileResponse:
             Whether a tenant-scoped profile was found and deleted.
     """
     del tenant_id, qr_payload, _rate_limited
+    response.delete_cookie(DEVICE_TOKEN_COOKIE_NAME)
     identity = await verify_device_token(
         session,
         tenant_id=context.tenant_id,
@@ -342,7 +355,24 @@ async def delete_profile(
         tenant_id=context.tenant_id,
         customer_id=identity.customer_id,
     )
+    session_memory_deleted = False
+    otp_challenge_deleted = False
     if deleted:
+        if session_id:
+            try:
+                await get_redis_session_memory().delete(
+                    tenant_id=context.tenant_id,
+                    session_id=session_id,
+                )
+                session_memory_deleted = True
+            except Exception:
+                session_memory_deleted = False
+        if challenge_id:
+            try:
+                await otp_service.delete_challenge(challenge_id)
+                otp_challenge_deleted = True
+            except Exception:
+                otp_challenge_deleted = False
         await append_audit_event(
             session,
             context=_audit_context(context, actor=f"customer:{identity.customer_id}"),
@@ -351,6 +381,8 @@ async def delete_profile(
                 "customer_id": identity.customer_id,
                 "location_id": context.location_id,
                 "table_id": context.table_id,
+                "session_memory_deleted": session_memory_deleted,
+                "otp_challenge_deleted": otp_challenge_deleted,
             },
         )
     return DeleteProfileResponse(deleted=deleted)
