@@ -15,6 +15,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Index,
     Numeric,
     String,
     Table,
@@ -1043,6 +1044,16 @@ class EpisodicEvent(Base):
 class Consent(Base):
     """SQLAlchemy model for consent records."""
     __tablename__ = "consents"
+    __table_args__ = (
+        Index(
+            "uq_consents_active_customer_scope",
+            "customer_id",
+            "scope",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     customer_id: Mapped[int] = mapped_column(
@@ -1082,6 +1093,8 @@ class CustomerDeviceToken(Base):
         nullable=False,
         server_default=func.now(),
     )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="device_tokens")

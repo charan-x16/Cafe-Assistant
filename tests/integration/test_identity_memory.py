@@ -11,14 +11,16 @@ import math
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from cafe_assistant.agent.state_machine import AgentConfig, AgentState, ChatAgent, ChatAgentRequest
 from cafe_assistant.db.base import Base
-from cafe_assistant.db.models import EpisodicEvent, Location, Tenant
+from cafe_assistant.db.models import Consent, CustomerDeviceToken, EpisodicEvent, Location, Tenant
 from cafe_assistant.db.repositories.consent_repo import DIETARY_HEALTH_SCOPE, grant_consent
 from cafe_assistant.db.repositories.profile_repo import (
     delete_customer_profile,
@@ -28,8 +30,9 @@ from cafe_assistant.db.repositories.profile_repo import (
 )
 from cafe_assistant.domain.dietary import AllergenCode, CustomerRestrictions
 from cafe_assistant.gateway.model_gateway import ChatMessage, ChatModelCascade
-from cafe_assistant.identity.device import issue_device_token, verify_device_token
-from cafe_assistant.identity.otp import OtpService, hash_phone
+from cafe_assistant.identity.device import issue_device_token, revoke_device_token, verify_device_token
+from cafe_assistant.config import settings
+from cafe_assistant.identity.otp import OtpError, OtpService, RedisOtpStore, hash_phone
 from cafe_assistant.memory.session import InMemorySessionMemory, SessionState
 from tests.fixtures.legacy_embeddings import backfill_menu_embeddings
 from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
@@ -177,6 +180,69 @@ class CapturingSmsSender:
                 The phone/code pair is appended to the capture list.
         """
         self.sent.append((phone, code))
+
+
+class FakeRedis:
+    """Minimal async Redis double for OTP challenge storage tests."""
+
+    def __init__(self) -> None:
+        """Initialize empty value and TTL maps.
+
+        Args:
+            None:
+                The fake has no external dependencies.
+
+        Returns:
+            None:
+                The fake Redis store is ready for get/set/delete calls.
+        """
+        self.values: dict[str, str] = {}
+        self.expirations: dict[str, int] = {}
+
+    async def set(self, key: str, value: str, *, ex: int) -> None:
+        """Store a string value with an expiry value.
+
+        Args:
+            key (str):
+                Redis key to store.
+            value (str):
+                Serialized value to store.
+            ex (int):
+                TTL in seconds requested by the caller.
+
+        Returns:
+            None:
+                The key/value and TTL maps are updated.
+        """
+        self.values[key] = value
+        self.expirations[key] = ex
+
+    async def get(self, key: str) -> str | None:
+        """Return a stored value by key.
+
+        Args:
+            key (str):
+                Redis key to look up.
+
+        Returns:
+            str | None:
+                Stored value, or None when absent.
+        """
+        return self.values.get(key)
+
+    async def delete(self, key: str) -> None:
+        """Delete a stored value and its TTL entry.
+
+        Args:
+            key (str):
+                Redis key to delete.
+
+        Returns:
+            None:
+                Missing keys are ignored.
+        """
+        self.values.pop(key, None)
+        self.expirations.pop(key, None)
 
 
 @dataclass(slots=True)
@@ -372,6 +438,161 @@ async def test_health_facts_are_gated_until_otp_consent(
     assert consented_profile.dietary_facts["avoid_allergens"] == ["PEANUT"]
     assert DIETARY_HEALTH_SCOPE in confirmed.granted_scopes
 
+
+async def test_redis_otp_store_persists_challenge_with_ttl(
+    identity_fixture: IdentityFixture,
+) -> None:
+    """Verify Redis-backed OTP storage persists and deletes challenges.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Seeded fixture containing a database session and tenant ID.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    redis = FakeRedis()
+    sms_sender = CapturingSmsSender()
+    otp_service = OtpService(sender=sms_sender, store=RedisOtpStore(redis))
+
+    start = await otp_service.start(
+        tenant_id=identity_fixture.tenant_id,
+        phone="+15555550201",
+    )
+    assert sms_sender.sent
+    assert redis.expirations
+    _sent_phone, code = sms_sender.sent[-1]
+
+    confirmed = await otp_service.confirm(
+        identity_fixture.session,
+        tenant_id=identity_fixture.tenant_id,
+        phone="+15555550201",
+        challenge_id=start.challenge_id,
+        code=code,
+    )
+
+    assert confirmed.customer_id > 0
+    assert redis.values == {}
+
+
+async def test_noop_sms_sender_fails_closed_outside_local() -> None:
+    """Verify the default no-op SMS sender cannot start OTP in production.
+
+    Args:
+        None:
+            This test temporarily changes the process settings object.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    original_environment = settings.environment
+    try:
+        settings.environment = "production"
+        otp_service = OtpService()
+        with pytest.raises(OtpError, match="SMS sender"):
+            await otp_service.start(tenant_id=1, phone="+15555550202")
+    finally:
+        settings.environment = original_environment
+
+
+async def test_device_token_expiry_and_revocation(
+    identity_fixture: IdentityFixture,
+) -> None:
+    """Verify expired and revoked device tokens no longer recognize customers.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Seeded fixture containing a database session and tenant ID.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    session = identity_fixture.session
+    customer = await get_or_create_customer_by_phone(
+        session,
+        tenant_id=identity_fixture.tenant_id,
+        phone_hash=hash_phone("+15555550203"),
+    )
+    expired_token = await issue_device_token(
+        session,
+        tenant_id=identity_fixture.tenant_id,
+        customer_id=customer.id,
+    )
+    token_row = await session.scalar(
+        select(CustomerDeviceToken).where(CustomerDeviceToken.customer_id == customer.id)
+    )
+    assert token_row is not None
+    token_row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await session.flush()
+
+    expired_identity = await verify_device_token(
+        session,
+        tenant_id=identity_fixture.tenant_id,
+        token=expired_token,
+    )
+    assert expired_identity is None
+
+    active_token = await issue_device_token(
+        session,
+        tenant_id=identity_fixture.tenant_id,
+        customer_id=customer.id,
+    )
+    active_identity = await verify_device_token(
+        session,
+        tenant_id=identity_fixture.tenant_id,
+        token=active_token,
+    )
+    assert active_identity is not None
+
+    revoked = await revoke_device_token(
+        session,
+        tenant_id=identity_fixture.tenant_id,
+        token=active_token,
+    )
+    revoked_identity = await verify_device_token(
+        session,
+        tenant_id=identity_fixture.tenant_id,
+        token=active_token,
+    )
+    assert revoked is True
+    assert revoked_identity is None
+
+
+async def test_duplicate_active_consent_is_blocked_by_database(
+    identity_fixture: IdentityFixture,
+) -> None:
+    """Verify the database blocks duplicate active consent rows.
+
+    Args:
+        identity_fixture (IdentityFixture):
+            Seeded fixture containing a database session and tenant ID.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    session = identity_fixture.session
+    customer = await get_or_create_customer_by_phone(
+        session,
+        tenant_id=identity_fixture.tenant_id,
+        phone_hash=hash_phone("+15555550204"),
+    )
+    granted = await grant_consent(
+        session,
+        tenant_id=identity_fixture.tenant_id,
+        customer_id=customer.id,
+        scope=DIETARY_HEALTH_SCOPE,
+    )
+    assert granted is True
+    await session.commit()
+
+    session.add(Consent(customer_id=customer.id, scope=DIETARY_HEALTH_SCOPE))
+    with pytest.raises(IntegrityError):
+        await session.flush()
+    await session.rollback()
 
 async def test_session_memory_is_tenant_scoped_for_same_session_id(
     identity_fixture: IdentityFixture,

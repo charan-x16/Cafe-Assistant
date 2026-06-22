@@ -289,13 +289,14 @@
         const assistantNode = appendMessage("assistant", "");
 
         try {
+          const headers = { "Content-Type": "application/json" };
+          if (deviceToken) headers.Authorization = `Bearer ${deviceToken}`;
           const response = await fetch("/chat", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers,
             body: JSON.stringify({
               session_id: sessionId,
               tenant_id: tenantId,
-              device_token: deviceToken || null,
               message: text,
             }),
           });
@@ -386,9 +387,9 @@
 
       viewProfileButton.addEventListener("click", async () => {
         if (!deviceToken) return;
-        const response = await fetch(
-          `/identity/profile?tenant_id=${tenantId}&device_token=${encodeURIComponent(deviceToken)}`,
-        );
+        const response = await fetch(`/identity/profile?tenant_id=${tenantId}`, {
+          headers: { Authorization: `Bearer ${deviceToken}` },
+        });
         if (!response.ok) return;
         const profile = await response.json();
         appendMessage("assistant", `Remembered profile: ${JSON.stringify(profile.preferences)}`);
@@ -396,10 +397,10 @@
 
       forgetProfileButton.addEventListener("click", async () => {
         if (!deviceToken) return;
-        await fetch(
-          `/identity/profile?tenant_id=${tenantId}&device_token=${encodeURIComponent(deviceToken)}`,
-          { method: "DELETE" },
-        );
+        await fetch(`/identity/profile?tenant_id=${tenantId}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${deviceToken}` },
+        });
         localStorage.removeItem("cafeAssistantDeviceToken");
         deviceToken = "";
         updateMemoryActions();
