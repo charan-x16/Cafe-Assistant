@@ -12,8 +12,10 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
-from cafe_assistant.gateway.model_gateway import ChatMessage, ChatProvider
-from cafe_assistant.observability.tracing import span, token_count
+from cafe_assistant.config import settings
+from cafe_assistant.gateway.model_gateway import ChatMessage, ChatProvider, get_last_chat_metadata
+from cafe_assistant.observability.metrics import record_llm_cost
+from cafe_assistant.observability.tracing import estimate_cost, span, token_count
 from cafe_assistant.security.injection import wrap_untrusted_text
 
 
@@ -88,12 +90,20 @@ class MessageRouter:
             result = rules_result
             source = "rules"
             if rules_result.confidence < 0.6:
-                cheap_result = await self._classify_with_model(self.cheap_model, message)
+                cheap_result = await self._classify_with_model(
+                    self.cheap_model,
+                    message,
+                    model_role="cheap",
+                )
                 if cheap_result is not None and cheap_result.confidence >= 0.6:
                     result = cheap_result
                     source = "cheap_model"
                 else:
-                    strong_result = await self._classify_with_model(self.strong_model, message)
+                    strong_result = await self._classify_with_model(
+                        self.strong_model,
+                        message,
+                        model_role="strong",
+                    )
                     if strong_result is not None:
                         result = strong_result
                         source = "strong_model"
@@ -136,6 +146,8 @@ class MessageRouter:
         self,
         provider: ChatProvider,
         message: str,
+        *,
+        model_role: str,
     ) -> ClassificationResult | None:
         """Ask one chat provider to classify a low-confidence message.
 
@@ -144,6 +156,8 @@ class MessageRouter:
                 Chat provider used for this classifier attempt.
             message (str):
                 Current user message, wrapped as untrusted data in the prompt.
+            model_role (str):
+                Cascade role for cost rates and trace labels.
 
         Returns:
             ClassificationResult | None:
@@ -157,20 +171,71 @@ class MessageRouter:
             f"Message: {wrap_untrusted_text('user_message', message)}"
         )
         chunks: list[str] = []
+        input_tokens = token_count(prompt)
         with span(
             "llm.classify",
-            model="cheap_or_strong",
+            model=model_role,
             prompt_version="classifier_v1",
-            input_tokens=token_count(prompt),
+            input_tokens=input_tokens,
         ) as record:
             async for chunk in provider.stream_chat(
                 [ChatMessage(role="user", content=prompt)],
                 timeout_seconds=2.0,
             ):
                 chunks.append(chunk)
-            record.attributes["output_tokens"] = token_count("".join(chunks))
+            output_text = "".join(chunks)
+            metadata = get_last_chat_metadata(provider)
+            output_tokens = (
+                metadata.output_tokens if metadata is not None else token_count(output_text)
+            )
+            cost = (
+                metadata.estimated_cost_usd
+                if metadata is not None
+                else _estimate_classifier_cost(
+                    model_role,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+            )
+            model_name = metadata.model_name if metadata is not None else model_role
+            record.attributes.update(
+                {
+                    "provider": metadata.provider_name if metadata is not None else "unknown",
+                    "model": model_name,
+                    "output_tokens": output_tokens,
+                    "cost_usd": cost,
+                    "retry_count": metadata.retry_count if metadata is not None else 0,
+                    "fallback_used": metadata.fallback_used if metadata is not None else False,
+                }
+            )
+            record_llm_cost(cost, model=model_name, prompt_version="classifier_v1")
         text = "".join(chunks).strip().lower()
         for intent in Intent:
             if intent.value in text:
                 return ClassificationResult(intent, 0.65)
         return None
+
+
+def _estimate_classifier_cost(model_role: str, *, input_tokens: int, output_tokens: int) -> float:
+    """Estimate classifier model cost when a provider does not expose metadata.
+
+    Args:
+        model_role (str): Cascade role, either `cheap` or `strong`.
+        input_tokens (int): Prompt tokens counted locally.
+        output_tokens (int): Output tokens counted locally.
+
+    Returns:
+        float: Estimated USD cost for the classifier call.
+    """
+    if model_role == "strong":
+        input_rate = settings.strong_model_input_cost_per_1k
+        output_rate = settings.strong_model_output_cost_per_1k
+    else:
+        input_rate = settings.cheap_model_input_cost_per_1k
+        output_rate = settings.cheap_model_output_cost_per_1k
+    return estimate_cost(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        input_cost_per_1k=input_rate,
+        output_cost_per_1k=output_rate,
+    )

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from cafe_assistant.config import settings
 from cafe_assistant.domain.dietary import CustomerRestrictions, MenuItemView
-from cafe_assistant.gateway.model_gateway import ChatMessage, ChatProvider
+from cafe_assistant.gateway.model_gateway import ChatMessage, ChatProvider, get_last_chat_metadata
 from cafe_assistant.observability.metrics import record_llm_cost
 from cafe_assistant.observability.tracing import estimate_cost, span, token_count
 from cafe_assistant.security.injection import (
@@ -98,22 +98,36 @@ class ResponseComposer:
                 output_chunks.append(token)
                 yield token
             output_text = "".join(output_chunks)
-            output_tokens = token_count(output_text)
-            cost = estimate_cost(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                input_cost_per_1k=settings.strong_model_input_cost_per_1k,
-                output_cost_per_1k=settings.strong_model_output_cost_per_1k,
+            metadata = get_last_chat_metadata(self.strong_model)
+            output_tokens = (
+                metadata.output_tokens if metadata is not None else token_count(output_text)
+            )
+            cost = (
+                metadata.estimated_cost_usd
+                if metadata is not None
+                else estimate_cost(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    input_cost_per_1k=settings.strong_model_input_cost_per_1k,
+                    output_cost_per_1k=settings.strong_model_output_cost_per_1k,
+                )
+            )
+            model_name = (
+                metadata.model_name if metadata is not None else settings.default_chat_model_name
             )
             record.attributes.update(
                 {
+                    "provider": metadata.provider_name if metadata is not None else "unknown",
+                    "model": model_name,
                     "output_tokens": output_tokens,
                     "cost_usd": cost,
+                    "retry_count": metadata.retry_count if metadata is not None else 0,
+                    "fallback_used": metadata.fallback_used if metadata is not None else False,
                 }
             )
             record_llm_cost(
                 cost,
-                model=settings.default_chat_model_name,
+                model=model_name,
                 prompt_version=PROMPT_VERSION,
             )
 
