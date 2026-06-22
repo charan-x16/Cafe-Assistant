@@ -377,6 +377,9 @@ The app also reads `.env` locally.
 | `SESSION_RETENTION_DAYS` | `14` | Session/event retention window |
 | `AUDIT_RETENTION_DAYS` | `730` | Audit retention window |
 | `OBSERVABILITY_ADMIN_TOKEN` | local token | Admin token required for metrics and replay |
+| `OBSERVABILITY_TRACE_STORE_PATH` | `var/observability/traces.jsonl` | Durable redacted JSONL trace spool for replay |
+| `TRACE_STORE_MAX_TRACES` | `500` | In-memory trace cache size per worker |
+| `METRICS_LATENCY_SAMPLE_LIMIT` | `2000` | Bounded latency samples retained per metric series |
 | `LANGFUSE_ENABLED` | `false` | Enable Langfuse integration |
 | `LANGFUSE_PUBLIC_KEY` | empty | Langfuse public key |
 | `LANGFUSE_SECRET_KEY` | empty | Langfuse secret key |
@@ -590,13 +593,16 @@ explicit customer consent. Profile read and deletion are tenant scoped.
 
 ```http
 GET /metrics?tenant_id=<tenant_id>
+GET /metrics/openmetrics?tenant_id=<tenant_id>
 GET /observability/replay/{trace_id}?tenant_id=<tenant_id>
 X-Admin-Token: <OBSERVABILITY_ADMIN_TOKEN>
 ```
 
-`/metrics` returns in-process reliability, quality, latency, and estimated cost
-metrics. Replay reconstructs stored trace details for incident debugging, but only
-for traces owned by the request tenant and only after admin-token validation.
+`/metrics` returns JSON reliability, quality, latency, and estimated cost metrics.
+`/metrics/openmetrics` returns the same process metrics in a scrape-friendly
+OpenMetrics text format. Replay reconstructs redacted trace details from memory or
+the durable JSONL trace spool, but only for traces owned by the request tenant
+and only after admin-token validation.
 
 ## Chat Agent Flow
 
@@ -718,14 +724,21 @@ Replay a trace through the API:
 curl -H "X-Admin-Token: $OBSERVABILITY_ADMIN_TOKEN" "http://localhost:8000/observability/replay/<trace_id>?tenant_id=1"
 ```
 
-Replay a trace from the command line:
+Replay a trace from the local durable JSONL spool:
 
 ```bash
 uv run python scripts/incident_replay.py <trace_id>
 ```
 
+Replay a deployed trace through the secured API:
+
+```bash
+uv run python scripts/incident_replay.py <trace_id> --base-url http://localhost:8000 --tenant-id 1 --admin-token "$OBSERVABILITY_ADMIN_TOKEN"
+```
+
 Langfuse is configurable through environment variables and disabled by default.
-Tests run against no-op/local observability behavior.
+Langfuse export failures are counted as observability failures without blocking
+customer requests. Tests run against no-op/local observability behavior.
 
 ## Evaluation Suite
 

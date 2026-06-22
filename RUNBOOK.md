@@ -15,46 +15,55 @@ Production runtime components:
 
 ## How to Read a Trace
 
-Use the replay endpoint for in-process traces:
+Use the secured replay endpoint for deployed traces:
 
 ```bash
-curl "$BASE_URL/observability/replay/$TRACE_ID"
+curl -H "X-Admin-Token: $OBSERVABILITY_ADMIN_TOKEN" \
+  "$BASE_URL/observability/replay/$TRACE_ID?tenant_id=$TENANT_ID"
 ```
 
-Or from a shell in the same process context:
+Use the local durable JSONL trace spool from an operator shell:
 
 ```bash
 uv run python scripts/incident_replay.py "$TRACE_ID"
+```
+
+Or ask the CLI to call the secured API for you:
+
+```bash
+uv run python scripts/incident_replay.py "$TRACE_ID" \
+  --base-url "$BASE_URL" \
+  --tenant-id "$TENANT_ID" \
+  --admin-token "$OBSERVABILITY_ADMIN_TOKEN"
 ```
 
 Look for:
 
 - `version_registry`: prompt, tool, retriever, model, policy, memory-rule, and
   orchestrator versions active for the request.
+- `route` and `route_confidence`: classifier decision used before retrieval.
 - `prompt_context`: sanitized model messages and prompt version.
 - `retrieved_items`: candidate item ids returned by retrieval/tool spans.
 - `tools`: `menu_lookup`, `search_menu`, and `dietary_filter` spans.
-- `spans`: duration, errors, and attributes for each request step.
+- `spans`: span IDs, parent span IDs, duration, errors, and redacted attributes
+  for each request step.
 
 For a safety incident, confirm that the LLM context contains only `SAFE_ITEM`
 lines and that unsafe/allergen-incomplete items were excluded before composing.
 
 ## Incident Replay
 
-1. Find `trace_id` from the response headers, audit event, or logs.
-2. Run:
-
-```bash
-uv run python scripts/incident_replay.py "$TRACE_ID"
-```
-
+1. Find `trace_id` from the response headers, audit event, or redacted logs.
+2. Replay through the API when debugging a deployed request, or through the local
+   durable spool when working from the same persistent trace volume.
 3. Capture:
    - request id and tenant id
    - version registry
+   - route and classifier confidence
    - retrieved item ids
    - safe item ids
    - prompt version and sanitized prompt context
-   - any failed tool or model spans
+   - any failed tool, retrieval, observability, or model spans
 4. Re-run the eval gate locally:
 
 ```bash
@@ -152,5 +161,5 @@ deploy/rollback.sh
 - Rollback drill: `deploy/rollback.sh`
   Acceptance: stable deployment returns to last known good image and health checks
   pass.
-- Observability: `GET /metrics` and `GET /observability/replay/{trace_id}`
-  Acceptance: metrics families are present and traces include the version registry.
+- Observability: `GET /metrics`, `GET /metrics/openmetrics`, and `GET /observability/replay/{trace_id}`
+  Acceptance: metrics families are present, OpenMetrics renders, replay is tenant/admin scoped, and traces include the version registry.

@@ -19,7 +19,7 @@ from cafe_assistant.api.deps import (
 )
 from cafe_assistant.db.session import get_session
 from cafe_assistant.observability.metrics import RequestTimer
-from cafe_assistant.observability.tracing import start_trace
+from cafe_assistant.observability.tracing import finish_trace, start_trace
 
 router = APIRouter()
 _STATIC_DIR = Path(__file__).parents[3] / "static"
@@ -117,6 +117,7 @@ async def chat(
             yield "event: done\ndata: {}\n\n"
         finally:
             timer.finish(ok=ok)
+            finish_trace(context.trace_id)
 
     return StreamingResponse(
         event_stream(),

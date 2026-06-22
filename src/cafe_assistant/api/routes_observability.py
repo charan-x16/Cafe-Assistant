@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import PlainTextResponse
 
 from cafe_assistant.api.deps import (
     RequestContext,
@@ -50,6 +51,33 @@ async def metrics(
     """
     del context, _rate_limited, _admin
     return get_metrics_registry().snapshot()
+
+
+@router.get("/metrics/openmetrics", response_class=PlainTextResponse)
+async def openmetrics(
+    context: RequestContextDependency,
+    _rate_limited: RateLimitDependency,
+    _admin: AdminDependency,
+) -> PlainTextResponse:
+    """Return OpenMetrics text to an authorized tenant-scoped admin caller.
+
+    Args:
+        context (RequestContext):
+            Tenant, request, and trace context resolved for the metrics request.
+        _rate_limited (None):
+            Dependency marker confirming rate-limit checks have run.
+        _admin (None):
+            Dependency marker confirming admin authentication has passed.
+
+    Returns:
+        PlainTextResponse:
+            OpenMetrics-compatible text payload suitable for scraping.
+    """
+    del context, _rate_limited, _admin
+    return PlainTextResponse(
+        get_metrics_registry().to_openmetrics(),
+        media_type="application/openmetrics-text; version=1.0.0; charset=utf-8",
+    )
 
 
 @router.get("/observability/replay/{trace_id}")
