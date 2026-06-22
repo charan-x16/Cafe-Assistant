@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from cafe_assistant.agent.state_machine import AgentConfig, AgentState, ChatAgent, ChatAgentRequest
+from cafe_assistant.config import settings
 from cafe_assistant.db.base import Base
 from cafe_assistant.db.models import Consent, CustomerDeviceToken, EpisodicEvent, Location, Tenant
 from cafe_assistant.db.repositories.consent_repo import DIETARY_HEALTH_SCOPE, grant_consent
@@ -30,8 +31,11 @@ from cafe_assistant.db.repositories.profile_repo import (
 )
 from cafe_assistant.domain.dietary import AllergenCode, CustomerRestrictions
 from cafe_assistant.gateway.model_gateway import ChatMessage, ChatModelCascade
-from cafe_assistant.identity.device import issue_device_token, revoke_device_token, verify_device_token
-from cafe_assistant.config import settings
+from cafe_assistant.identity.device import (
+    issue_device_token,
+    revoke_device_token,
+    verify_device_token,
+)
 from cafe_assistant.identity.otp import OtpError, OtpService, RedisOtpStore, hash_phone
 from cafe_assistant.memory.session import InMemorySessionMemory, SessionState
 from tests.fixtures.legacy_embeddings import backfill_menu_embeddings

@@ -24,7 +24,10 @@ from cafe_assistant.api.deps import (
     request_context,
 )
 from cafe_assistant.config import settings
-from cafe_assistant.db.repositories.consent_repo import DIETARY_HEALTH_SCOPE, InvalidConsentScopeError
+from cafe_assistant.db.repositories.consent_repo import (
+    DIETARY_HEALTH_SCOPE,
+    InvalidConsentScopeError,
+)
 from cafe_assistant.db.repositories.profile_repo import delete_customer_profile, load_stored_profile
 from cafe_assistant.db.session import get_session
 from cafe_assistant.identity.device import verify_device_token

@@ -166,7 +166,10 @@ async def device_token_from_request(request: Request) -> str | None:
             None for anonymous requests.
     """
     payload = await _payload(request)
-    if request.query_params.get("device_token") is not None or payload.get("device_token") is not None:
+    if (
+        request.query_params.get("device_token") is not None
+        or payload.get("device_token") is not None
+    ):
         raise HTTPException(
             status_code=400,
             detail="device_token must be sent in the Authorization header or secure cookie.",
@@ -202,7 +205,11 @@ async def _resolve_tenant_context(
             parsed = parse_tenant_context(qr_payload)
         except (InvalidQrPayloadError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        await _validate_qr_location(session, tenant_id=parsed.tenant_id, location_id=parsed.location_id)
+        await _validate_qr_location(
+            session,
+            tenant_id=parsed.tenant_id,
+            location_id=parsed.location_id,
+        )
         return _ResolvedTenantContext(
             tenant_id=parsed.tenant_id,
             location_id=parsed.location_id,

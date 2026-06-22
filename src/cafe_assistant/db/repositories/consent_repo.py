@@ -93,7 +93,14 @@ async def has_active_consent(
     customer = await get_customer(session, tenant_id=tenant_id, customer_id=customer_id)
     if customer is None:
         return False
-    return await _active_consent(session, customer_id=customer_id, scope=validated_scope) is not None
+    return (
+        await _active_consent(
+            session,
+            customer_id=customer_id,
+            scope=validated_scope,
+        )
+        is not None
+    )
 
 
 async def revoke_all_consents(
