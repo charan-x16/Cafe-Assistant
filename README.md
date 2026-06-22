@@ -356,13 +356,13 @@ The app also reads `.env` locally.
 | `QDRANT_ENDPOINT` | empty | Alias for `QDRANT_URL` |
 | `QDRANT_API_KEY` | empty | Qdrant API key |
 | `QDRANT_COLLECTION` | `cafe_assistant_menu_policy` | Qdrant collection for menu and policy vectors |
-| `LLM_PROVIDER` | `openai` | Intended LLM provider label |
+| `LLM_PROVIDER` | `openai` | Provider used when chat provider is `llm`, `default`, or `configured` |
 | `LLM_MODEL` | `gpt-4o-mini` | Intended chat model label |
 | `LLM_API_KEY` | empty | Local secret for the real chat provider once enabled |
-| `CHEAP_CHAT_PROVIDER` | `local` | Cheap model path for classification |
-| `STRONG_CHAT_PROVIDER` | `local` | Strong model path for synthesis |
-| `CHAT_TIMEOUT_SECONDS` | `8.0` | Per-provider chat timeout |
-| `CHAT_RETRIES` | `1` | Provider retry count |
+| `CHEAP_CHAT_PROVIDER` | `local` | Classification provider; set to `llm` to use `LLM_PROVIDER` |
+| `STRONG_CHAT_PROVIDER` | `local` | Synthesis provider; set to `llm` to use `LLM_PROVIDER` |
+| `CHAT_TIMEOUT_SECONDS` | `8.0` | Total gateway deadline across retries and fallback |
+| `CHAT_RETRIES` | `1` | Retry count for retryable provider failures |
 | `AGENT_DEADLINE_SECONDS` | `12.0` | Per-request agent deadline |
 | `AGENT_MAX_TOOL_CALLS` | `4` | Tool-call budget |
 | `IDENTITY_PHONE_HASH_SECRET` | local secret | Salt/secret for phone hashing |
