@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     session_retention_days: int = 14
     audit_retention_days: int = 730
     observability_admin_token: str = "local-dev-observability-admin-token"
+    observability_trace_store_path: str = "var/observability/traces.jsonl"
+    trace_store_max_traces: int = 500
+    metrics_latency_sample_limit: int = 2000
     langfuse_enabled: bool = False
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None

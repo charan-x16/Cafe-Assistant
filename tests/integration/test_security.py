@@ -614,6 +614,11 @@ async def test_observability_requires_admin_and_tenant_scoped_replay(
             params={"tenant_id": tenant_id},
             headers=headers,
         )
+        authorized_openmetrics = await client.get(
+            "/metrics/openmetrics",
+            params={"tenant_id": tenant_id},
+            headers=headers,
+        )
         replay = await client.get(
             "/observability/replay/trace-sec-replay",
             params={"tenant_id": tenant_id},
@@ -628,6 +633,8 @@ async def test_observability_requires_admin_and_tenant_scoped_replay(
     app.dependency_overrides.clear()
     assert anonymous_metrics.status_code == 401
     assert authorized_metrics.status_code == 200
+    assert authorized_openmetrics.status_code == 200
+    assert "# EOF" in authorized_openmetrics.text
     assert replay.status_code == 200
     assert replay.json()["tenant_id"] == tenant_id
     assert cross_tenant_replay.status_code == 404

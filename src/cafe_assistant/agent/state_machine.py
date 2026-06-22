@@ -51,7 +51,7 @@ from cafe_assistant.memory.write_gate import (
     persist_allowed_writes,
 )
 from cafe_assistant.observability.metrics import record_quality_event
-from cafe_assistant.observability.tracing import span, start_trace
+from cafe_assistant.observability.tracing import finish_trace, span, start_trace
 from cafe_assistant.security.audit import AuditContext, append_audit_event
 
 T = TypeVar("T")
@@ -307,6 +307,8 @@ class ChatAgent:
                 response=SAFE_FAILURE_RESPONSE,
                 state_history=[AgentState.FAILED],
             )
+        finally:
+            finish_trace(request.trace_id)
 
     async def stream_response(self, request: ChatAgentRequest) -> AsyncIterator[str]:
         """Stream the chat response while preserving the same safety boundary.
