@@ -94,7 +94,19 @@ class SessionMemory(Protocol):
             None:
                 Implementations complete through storage side effects.
         """
+    async def delete(self, *, tenant_id: int, session_id: str) -> None:
+        """Delete memory for one tenant/session pair.
 
+        Args:
+            tenant_id (int):
+                Tenant that owns the session memory.
+            session_id (str):
+                Browser or client session identifier within the tenant.
+
+        Returns:
+            None:
+                Missing records are ignored.
+        """
 
 class InMemorySessionMemory:
     """In-process tenant-scoped session memory used by tests."""
@@ -143,7 +155,20 @@ class InMemorySessionMemory:
                 The state is stored in memory under a tenant/session tuple key.
         """
         self._states[(tenant_id, session_id)] = _copy_state(state)
+    async def delete(self, *, tenant_id: int, session_id: str) -> None:
+        """Delete state for one tenant/session pair from the test store.
 
+        Args:
+            tenant_id (int):
+                Tenant that owns the session being deleted.
+            session_id (str):
+                Session identifier within the tenant.
+
+        Returns:
+            None:
+                Missing tenant/session pairs are ignored.
+        """
+        self._states.pop((tenant_id, session_id), None)
 
 class RedisSessionMemory:
     """Redis-backed tenant-scoped session memory for production requests."""
@@ -211,7 +236,20 @@ class RedisSessionMemory:
             json.dumps(_state_to_dict(state)),
             ex=self.ttl_seconds,
         )
+    async def delete(self, *, tenant_id: int, session_id: str) -> None:
+        """Delete tenant-scoped session state from Redis.
 
+        Args:
+            tenant_id (int):
+                Tenant that owns the session being deleted.
+            session_id (str):
+                Session identifier within the tenant.
+
+        Returns:
+            None:
+                Redis receives a delete for the tenant/session key.
+        """
+        await self.redis.delete(_key(tenant_id=tenant_id, session_id=session_id))
 
 def get_redis_session_memory() -> RedisSessionMemory:
     """Build the default Redis session-memory adapter from settings.

@@ -372,9 +372,11 @@ The app also reads `.env` locally.
 | `RATE_LIMIT_SESSION_WINDOW_SECONDS` | `60` | Session rate-limit window |
 | `RATE_LIMIT_IP_REQUESTS` | `120` | IP request limit |
 | `RATE_LIMIT_IP_WINDOW_SECONDS` | `60` | IP rate-limit window |
+| `RATE_LIMIT_HASH_SECRET` | local secret | HMAC secret for Redis rate-limit keys |
 | `PROFILE_RETENTION_DAYS` | `365` | Durable profile retention window |
 | `SESSION_RETENTION_DAYS` | `14` | Session/event retention window |
 | `AUDIT_RETENTION_DAYS` | `730` | Audit retention window |
+| `OBSERVABILITY_ADMIN_TOKEN` | local token | Admin token required for metrics and replay |
 | `LANGFUSE_ENABLED` | `false` | Enable Langfuse integration |
 | `LANGFUSE_PUBLIC_KEY` | empty | Langfuse public key |
 | `LANGFUSE_SECRET_KEY` | empty | Langfuse secret key |
@@ -587,12 +589,14 @@ explicit customer consent. Profile read and deletion are tenant scoped.
 ### Observability
 
 ```http
-GET /metrics
-GET /observability/replay/{trace_id}
+GET /metrics?tenant_id=<tenant_id>
+GET /observability/replay/{trace_id}?tenant_id=<tenant_id>
+X-Admin-Token: <OBSERVABILITY_ADMIN_TOKEN>
 ```
 
 `/metrics` returns in-process reliability, quality, latency, and estimated cost
-metrics. Replay reconstructs stored trace details for incident debugging.
+metrics. Replay reconstructs stored trace details for incident debugging, but only
+for traces owned by the request tenant and only after admin-token validation.
 
 ## Chat Agent Flow
 
@@ -654,12 +658,13 @@ Security controls:
 
 - Every data-bearing request requires tenant context.
 - All data access is tenant scoped in repositories and API dependencies.
-- Redis-backed rate limits apply per session and per IP.
+- Redis-backed rate limits apply per tenant/session and per tenant-scoped IP.
+- Rate-limit Redis keys store HMAC digests, not raw session IDs or IP addresses.
 - User text and menu text are treated as untrusted.
 - Prompt-injection-like phrases are neutralized before model/provider calls.
 - System instructions and retrieved data are kept separated.
-- Logs and audit payloads redact phone numbers, health terms, tokens, and
-  secrets.
+- Logs and audit payloads redact phone numbers, health terms, auth headers,
+  cookies, OTP details, provider keys, tokens, and secrets.
 - Significant actions append redacted rows to `audit_events`.
 - App code provides no update/delete path for audit events.
 
@@ -676,6 +681,8 @@ Retention cleanup:
 ```bash
 uv run python scripts/cleanup_retention.py --dry-run
 uv run python scripts/cleanup_retention.py
+# Privileged governance-only audit purge:
+uv run python scripts/cleanup_retention.py --purge-audit-events
 ```
 
 ## Observability
@@ -708,7 +715,7 @@ The version registry tracks:
 Replay a trace through the API:
 
 ```bash
-curl http://localhost:8000/observability/replay/<trace_id>
+curl -H "X-Admin-Token: $OBSERVABILITY_ADMIN_TOKEN" "http://localhost:8000/observability/replay/<trace_id>?tenant_id=1"
 ```
 
 Replay a trace from the command line:
@@ -879,13 +886,13 @@ curl http://localhost:8000/health
 ### Metrics
 
 ```bash
-curl http://localhost:8000/metrics
+curl -H "X-Admin-Token: $OBSERVABILITY_ADMIN_TOKEN" "http://localhost:8000/metrics?tenant_id=1"
 ```
 
 ### Trace Replay
 
 ```bash
-curl http://localhost:8000/observability/replay/<trace_id>
+curl -H "X-Admin-Token: $OBSERVABILITY_ADMIN_TOKEN" "http://localhost:8000/observability/replay/<trace_id>?tenant_id=1"
 ```
 
 ### Retention Cleanup
@@ -893,6 +900,8 @@ curl http://localhost:8000/observability/replay/<trace_id>
 ```bash
 uv run python scripts/cleanup_retention.py --dry-run
 uv run python scripts/cleanup_retention.py
+# Privileged governance-only audit purge:
+uv run python scripts/cleanup_retention.py --purge-audit-events
 ```
 
 ### Incident Response

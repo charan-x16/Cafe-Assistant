@@ -1,3 +1,13 @@
+"""PII, health-data, and secret redaction for logs, audits, and traces.
+
+Every user message, profile payload, provider credential, and retrieved document is
+considered untrusted operational data. This module provides conservative helpers
+used before payloads are written to audit rows, trace spans, or Python logging.
+It intentionally redacts more than the minimum needed so phone numbers, health
+facts, bearer tokens, cookies, OTP details, and provider keys are not persisted in
+raw form.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -6,11 +16,23 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 _PHONE_PATTERN = re.compile(r"(?<!\w)\+?\d[\d\s().-]{6,}\d(?!\w)")
-_TOKEN_PATTERN = re.compile(
-    r"\b(?P<key>device[_-]?token|token|secret|api[_-]?key|password)\b"
-    r"\s*[:=]\s*['\"]?[^,'\"\s}]+",
+_EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+_AUTH_HEADER_PATTERN = re.compile(
+    r"\b(?P<key>authorization|proxy-authorization)\b\s*[:=]\s*"
+    r"(?:bearer\s+)?[^,'\"\s}\]]+",
     re.IGNORECASE,
 )
+_COOKIE_PATTERN = re.compile(
+    r"\b(?P<key>cookie|set-cookie)\b\s*[:=]\s*[^\n\r,;]+",
+    re.IGNORECASE,
+)
+_KEY_VALUE_SECRET_PATTERN = re.compile(
+    r"\b(?P<key>[a-z0-9_-]*(?:api[_-]?key|secret|token|password|"
+    r"otp[_-]?code|challenge[_-]?id)[a-z0-9_-]*)\b"
+    r"\s*[:=]\s*['\"]?[^,'\"\s}\]]+",
+    re.IGNORECASE,
+)
+_BEARER_PATTERN = re.compile(r"\bbearer\s+[a-z0-9._~+/=-]+", re.IGNORECASE)
 _HEALTH_PATTERN = re.compile(
     r"\b("
     r"allerg(?:y|ic|ies)|peanuts?|tree\s*nuts?|dairy|gluten|soy|eggs?|"
@@ -18,42 +40,107 @@ _HEALTH_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_IP_PATTERN = re.compile(
+    r"\b(?P<key>client[_-]?ip|ip)\b\s*[:=]\s*"
+    r"(?:\d{1,3}(?:\.\d{1,3}){3}|[a-f0-9:]{3,})",
+    re.IGNORECASE,
+)
 _SENSITIVE_KEYS = {
-    "phone",
-    "phone_number",
-    "phone_hash",
-    "device_token",
-    "token",
-    "secret",
-    "password",
-    "api_key",
-    "dietary_facts",
-    "avoid_allergens",
     "allergies",
+    "api_key",
+    "authorization",
+    "avoid_allergens",
+    "bearer",
+    "challenge_id",
+    "client_ip",
+    "code",
+    "cookie",
+    "device_token",
+    "dietary_facts",
+    "email",
     "health",
+    "identity_device_token_hash_secret",
+    "identity_otp_hash_secret",
+    "identity_phone_hash_secret",
+    "ip",
+    "langfuse_secret_key",
+    "llm_api_key",
     "message",
+    "openai_api_key",
+    "otp",
+    "otp_code",
+    "password",
+    "phone",
+    "phone_hash",
+    "phone_number",
+    "qdrant_api_key",
+    "rate_limit_hash_secret",
+    "secret",
+    "session_id",
+    "set_cookie",
+    "token",
 }
 _original_record_factory: object | None = None
 
 
 def redact_text(value: str) -> str:
-    redacted = _PHONE_PATTERN.sub("[REDACTED_PHONE]", value)
-    redacted = _TOKEN_PATTERN.sub(lambda match: f"{match.group('key')}=[REDACTED]", redacted)
+    """Redact sensitive substrings from free-form text.
+
+    Args:
+        value (str):
+            Log, trace, or audit text that may contain PII, health facts, or secrets.
+
+    Returns:
+        str:
+            Text with recognized sensitive patterns replaced by redaction markers.
+    """
+    redacted = _AUTH_HEADER_PATTERN.sub(lambda match: f"{match.group('key')}=[REDACTED]", value)
+    redacted = _COOKIE_PATTERN.sub(lambda match: f"{match.group('key')}=[REDACTED]", redacted)
+    redacted = _KEY_VALUE_SECRET_PATTERN.sub(
+        lambda match: f"{match.group('key')}=[REDACTED]",
+        redacted,
+    )
+    redacted = _BEARER_PATTERN.sub("Bearer [REDACTED]", redacted)
+    redacted = _PHONE_PATTERN.sub("[REDACTED_PHONE]", redacted)
+    redacted = _EMAIL_PATTERN.sub("[REDACTED_EMAIL]", redacted)
+    redacted = _IP_PATTERN.sub(
+        lambda match: f"{match.group('key')}=[REDACTED_IP]",
+        redacted,
+    )
     redacted = _HEALTH_PATTERN.sub("[REDACTED_HEALTH]", redacted)
     return redacted
 
 
 def redact_payload(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Redact a JSON-like mapping before persistence or emission.
+
+    Args:
+        payload (Mapping[str, Any] | None):
+            Structured payload from audit, tracing, logging, or metrics code.
+
+    Returns:
+        dict[str, Any]:
+            Copy of the payload with sensitive keys and string values redacted.
+    """
     if payload is None:
         return {}
-    return {
-        str(key): _redact_value(str(key), value)
-        for key, value in payload.items()
-    }
+    return {str(key): _redact_value(str(key), value) for key, value in payload.items()}
 
 
 class RedactingFilter(logging.Filter):
+    """Logging filter that redacts records before handlers format them."""
+
     def filter(self, record: logging.LogRecord) -> bool:
+        """Redact a log record message and positional arguments in place.
+
+        Args:
+            record (logging.LogRecord):
+                Log record about to be emitted by Python logging.
+
+        Returns:
+            bool:
+                Always True so the record continues through normal logging flow.
+        """
         record.msg = redact_text(str(record.msg))
         if record.args:
             record.args = tuple(
@@ -64,6 +151,16 @@ class RedactingFilter(logging.Filter):
 
 
 def configure_redacted_logging() -> None:
+    """Install redaction on the root logger and future log records.
+
+    Args:
+        None:
+            Logging configuration is process global.
+
+    Returns:
+        None:
+            Repeated calls are idempotent and do not stack duplicate filters.
+    """
     global _original_record_factory
     root = logging.getLogger()
     if any(isinstance(filter_, RedactingFilter) for filter_ in root.filters):
@@ -83,7 +180,20 @@ def configure_redacted_logging() -> None:
 
 
 def _redact_value(key: str, value: Any) -> Any:
-    if key.lower() in _SENSITIVE_KEYS:
+    """Redact one structured value using its key and runtime type.
+
+    Args:
+        key (str):
+            Mapping key associated with the value, if known.
+        value (Any):
+            Arbitrary structured value to redact recursively.
+
+    Returns:
+        Any:
+            Redacted scalar or recursively redacted container.
+    """
+    normalized_key = key.lower().replace("-", "_")
+    if normalized_key in _SENSITIVE_KEYS:
         return "[REDACTED]"
     if isinstance(value, str):
         return redact_text(value)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import uuid
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -7,9 +8,14 @@ from typing import Annotated, Any
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.status import HTTP_429_TOO_MANY_REQUESTS
+from starlette.status import (
+    HTTP_401_UNAUTHORIZED,
+    HTTP_429_TOO_MANY_REQUESTS,
+    HTTP_503_SERVICE_UNAVAILABLE,
+)
 
-from cafe_assistant.db.models import Location
+from cafe_assistant.config import settings
+from cafe_assistant.db.models import Location, Tenant
 from cafe_assistant.db.session import get_session
 from cafe_assistant.identity.qr import InvalidQrPayloadError, parse_tenant_context
 from cafe_assistant.security.rate_limit import (
@@ -38,9 +44,10 @@ class RequestContext:
         trace_id (str):
             Trace identifier propagated across observability boundaries.
         client_ip (str):
-            Best-effort client IP used by rate limiting.
+            Best-effort client IP used by rate limiting. The raw value is never
+            placed directly into Redis keys by the rate limiter.
         actor (str):
-            Anonymous or customer actor label for audit events.
+            Anonymous, admin, or customer actor label for audit events.
     """
 
     tenant_id: int
@@ -54,7 +61,13 @@ class RequestContext:
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedTenantContext:
-    """Internal tenant context after request parsing and optional QR validation."""
+    """Internal tenant context after request parsing and optional QR validation.
+
+    Attributes:
+        tenant_id (int): Tenant ID validated against the authoritative database.
+        location_id (int | None): QR location ID when the request entered through QR.
+        table_id (str | None): QR table label when present in the payload.
+    """
 
     tenant_id: int
     location_id: int | None = None
@@ -91,7 +104,7 @@ async def request_context(
         request (Request):
             Incoming FastAPI request containing body, query params, headers, and client info.
         session (AsyncSession):
-            Database session used to validate QR tenant/location ownership.
+            Database session used to validate QR tenant/location ownership or direct tenant IDs.
 
     Returns:
         RequestContext:
@@ -101,7 +114,6 @@ async def request_context(
     tenant_context = await _resolve_tenant_context(request, session)
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     trace_id = request.headers.get("x-trace-id") or request_id
-    client_ip = request.client.host if request.client is not None else "unknown"
     actor = "anonymous"
     return RequestContext(
         tenant_id=tenant_context.tenant_id,
@@ -109,7 +121,7 @@ async def request_context(
         table_id=tenant_context.table_id,
         request_id=request_id,
         trace_id=trace_id,
-        client_ip=client_ip,
+        client_ip=_client_ip(request),
         actor=actor,
     )
 
@@ -119,7 +131,7 @@ async def rate_limit_dependency(
     context: Annotated[RequestContext, Depends(request_context)],
     limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
 ) -> None:
-    """Apply per-tenant session and IP rate limits to an API request.
+    """Apply tenant-scoped session and IP rate limits to an API request.
 
     Args:
         request (Request):
@@ -139,10 +151,11 @@ async def rate_limit_dependency(
         if session_id
         else f"tenant:{context.tenant_id}:anonymous"
     )
+    rate_ip_id = f"tenant:{context.tenant_id}:ip:{context.client_ip}"
     try:
         await limiter.check(
             session_id=rate_session_id,
-            client_ip=context.client_ip,
+            client_ip=rate_ip_id,
         )
     except RateLimitExceededError as exc:
         raise HTTPException(
@@ -150,6 +163,43 @@ async def rate_limit_dependency(
             detail="Rate limit exceeded.",
             headers={"Retry-After": str(exc.retry_after_seconds)},
         ) from exc
+
+
+async def admin_auth_dependency(
+    request: Request,
+    context: Annotated[RequestContext, Depends(request_context)],
+) -> None:
+    """Require the configured admin token for governance/observability routes.
+
+    Args:
+        request (Request):
+            Incoming request carrying `X-Admin-Token` or an Authorization Bearer token.
+        context (RequestContext):
+            Tenant context already resolved for the request. This dependency does
+            not use the value directly, but depending on it ensures observability
+            requests cannot run without a tenant scope.
+
+    Returns:
+        None:
+            The request is authorized to continue when the token matches settings.
+    """
+    del context
+    expected = settings.observability_admin_token.strip()
+    if not expected:
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Observability admin token is not configured.",
+        )
+    supplied = request.headers.get("x-admin-token") or _bearer_token(
+        request.headers.get("authorization")
+    )
+    if not supplied:
+        raise HTTPException(
+            status_code=HTTP_401_UNAUTHORIZED,
+            detail="Admin token is required.",
+        )
+    if not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=403, detail="Invalid admin token.")
 
 
 async def device_token_from_request(request: Request) -> str | None:
@@ -192,7 +242,7 @@ async def _resolve_tenant_context(
         request (Request):
             Incoming request containing a JSON body or query parameters.
         session (AsyncSession):
-            Database session used for QR location ownership validation.
+            Database session used for QR location ownership and direct tenant validation.
 
     Returns:
         _ResolvedTenantContext:
@@ -228,7 +278,26 @@ async def _resolve_tenant_context(
         ) from exc
     if parsed_tenant_id <= 0:
         raise HTTPException(status_code=400, detail="tenant_id must be a positive integer.")
+    await _validate_tenant(session, tenant_id=parsed_tenant_id)
     return _ResolvedTenantContext(tenant_id=parsed_tenant_id)
+
+
+async def _validate_tenant(session: AsyncSession, *, tenant_id: int) -> None:
+    """Validate that a direct tenant ID exists before request processing.
+
+    Args:
+        session (AsyncSession):
+            Database session used for the tenant lookup.
+        tenant_id (int):
+            Positive tenant ID parsed from the request body or query string.
+
+    Returns:
+        None:
+            The function returns only when the tenant exists.
+    """
+    found = await session.scalar(select(Tenant.id).where(Tenant.id == tenant_id))
+    if found is None:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
 
 
 async def _validate_qr_location(
@@ -311,6 +380,21 @@ def _bearer_token(header_value: str | None) -> str | None:
     if scheme.lower() != "bearer" or not token.strip():
         raise HTTPException(status_code=400, detail="Authorization must use Bearer token syntax.")
     return token.strip()
+
+
+def _client_ip(request: Request) -> str:
+    """Return the direct peer IP used for rate-limit identity construction.
+
+    Args:
+        request (Request):
+            Incoming request with Starlette client connection metadata.
+
+    Returns:
+        str:
+            Direct peer host when available, otherwise `unknown`. Reverse-proxy
+            headers are intentionally ignored until trusted proxy configuration is added.
+    """
+    return request.client.host if request.client is not None else "unknown"
 
 
 def _first_present(*values: Any) -> Any:

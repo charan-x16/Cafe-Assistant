@@ -65,9 +65,11 @@ class Settings(BaseSettings):
     rate_limit_session_window_seconds: int = 60
     rate_limit_ip_requests: int = 120
     rate_limit_ip_window_seconds: int = 60
+    rate_limit_hash_secret: str = "local-dev-rate-limit-hash-secret"
     profile_retention_days: int = 365
     session_retention_days: int = 14
     audit_retention_days: int = 730
+    observability_admin_token: str = "local-dev-observability-admin-token"
     langfuse_enabled: bool = False
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
