@@ -2,8 +2,9 @@
 
 These endpoints support the anonymous-to-remembered customer upgrade flow. OTP
 confirmation can attach consent-gated health facts from tenant-scoped session
-memory, profile reads are available only through a tenant-matched device token,
-and deletion removes durable customer memory through repository cascade paths.
+memory, profile reads are available only through a tenant-matched device token
+sent by approved transports, and deletion removes durable customer memory
+through repository cascade paths.
 """
 
 from __future__ import annotations
@@ -11,24 +12,35 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cafe_assistant.api.deps import RequestContext, rate_limit_dependency, request_context
-from cafe_assistant.db.repositories.consent_repo import DIETARY_HEALTH_SCOPE
+from cafe_assistant.api.deps import (
+    DEVICE_TOKEN_COOKIE_NAME,
+    RequestContext,
+    device_token_from_request,
+    rate_limit_dependency,
+    request_context,
+)
+from cafe_assistant.config import settings
+from cafe_assistant.db.repositories.consent_repo import (
+    DIETARY_HEALTH_SCOPE,
+    InvalidConsentScopeError,
+)
 from cafe_assistant.db.repositories.profile_repo import delete_customer_profile, load_stored_profile
 from cafe_assistant.db.session import get_session
 from cafe_assistant.identity.device import verify_device_token
-from cafe_assistant.identity.otp import OtpError, OtpService
+from cafe_assistant.identity.otp import OtpError, OtpService, get_default_otp_service
 from cafe_assistant.memory.session import get_redis_session_memory
 from cafe_assistant.security.audit import AuditContext, append_audit_event
 
 router = APIRouter(prefix="/identity", tags=["identity"])
-_otp_service = OtpService()
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
 RequestContextDependency = Annotated[RequestContext, Depends(request_context)]
 RateLimitDependency = Annotated[None, Depends(rate_limit_dependency)]
+DeviceTokenDependency = Annotated[str | None, Depends(device_token_from_request)]
+OtpServiceDependency = Annotated[OtpService, Depends(get_default_otp_service)]
 
 
 class TenantContextRequest(BaseModel):
@@ -92,6 +104,7 @@ async def start_otp(
     request: OtpStartRequest,
     context: RequestContextDependency,
     _rate_limited: RateLimitDependency,
+    otp_service: OtpServiceDependency,
 ) -> OtpStartResponse:
     """Start an OTP challenge for a tenant-scoped consent upgrade.
 
@@ -99,41 +112,52 @@ async def start_otp(
         request (OtpStartRequest):
             Phone number, requested scopes, and tenant context supplied by the client.
         context (RequestContext):
-            Resolved tenant and request metadata from API dependencies.
+            Resolved tenant, optional QR location/table, and request metadata.
         _rate_limited (None):
             Dependency marker confirming rate-limit checks have run.
+        otp_service (OtpService):
+            OTP service dependency used to create and send the challenge.
 
     Returns:
         OtpStartResponse:
             Challenge identifier and expiration time for the OTP code.
     """
     del _rate_limited
-    result = await _otp_service.start(
-        tenant_id=context.tenant_id,
-        phone=request.phone,
-        scopes=tuple(request.scopes),
-    )
+    try:
+        result = await otp_service.start(
+            tenant_id=context.tenant_id,
+            phone=request.phone,
+            scopes=tuple(request.scopes),
+        )
+    except (OtpError, InvalidConsentScopeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return OtpStartResponse(challenge_id=result.challenge_id, expires_at=result.expires_at)
 
 
 @router.post("/otp/confirm")
 async def confirm_otp(
     request: OtpConfirmRequest,
+    response: Response,
     session: SessionDependency,
     context: RequestContextDependency,
     _rate_limited: RateLimitDependency,
+    otp_service: OtpServiceDependency,
 ) -> OtpConfirmResponse:
     """Confirm an OTP challenge and create or link durable customer identity.
 
     Args:
         request (OtpConfirmRequest):
             OTP code, phone number, optional session ID, and tenant context.
+        response (Response):
+            FastAPI response used to set the approved HttpOnly device-token cookie.
         session (AsyncSession):
             Async database session used for profile, consent, token, and audit writes.
         context (RequestContext):
-            Resolved tenant and request metadata from API dependencies.
+            Resolved tenant, optional QR location/table, and request metadata.
         _rate_limited (None):
             Dependency marker confirming rate-limit checks have run.
+        otp_service (OtpService):
+            OTP service dependency used to confirm the challenge.
 
     Returns:
         OtpConfirmResponse:
@@ -151,7 +175,7 @@ async def confirm_otp(
             session_state = None
 
     try:
-        result = await _otp_service.confirm(
+        result = await otp_service.confirm(
             session,
             tenant_id=context.tenant_id,
             phone=request.phone,
@@ -170,6 +194,8 @@ async def confirm_otp(
             "phone": request.phone,
             "scopes": list(result.granted_scopes),
             "customer_id": result.customer_id,
+            "location_id": context.location_id,
+            "table_id": context.table_id,
         },
     )
     await append_audit_event(
@@ -180,7 +206,17 @@ async def confirm_otp(
             "source": "otp_confirm",
             "session_id": request.session_id,
             "customer_id": result.customer_id,
+            "location_id": context.location_id,
+            "table_id": context.table_id,
         },
+    )
+    response.set_cookie(
+        DEVICE_TOKEN_COOKIE_NAME,
+        result.device_token,
+        httponly=True,
+        secure=settings.environment.strip().lower() not in {"local", "test", "development"},
+        samesite="lax",
+        max_age=settings.device_token_ttl_seconds,
     )
     return OtpConfirmResponse(
         customer_id=result.customer_id,
@@ -195,9 +231,9 @@ async def get_profile(
     session: SessionDependency,
     context: RequestContextDependency,
     _rate_limited: RateLimitDependency,
+    device_token: DeviceTokenDependency,
     tenant_id: int | None = Query(default=None),
     qr_payload: str | None = Query(default=None),
-    device_token: str | None = Query(default=None),
 ) -> ProfileResponse:
     """Return an inspectable profile for a recognized tenant-scoped device token.
 
@@ -205,15 +241,15 @@ async def get_profile(
         session (AsyncSession):
             Async database session used for profile read and audit write.
         context (RequestContext):
-            Resolved tenant and request metadata from API dependencies.
+            Resolved tenant, optional QR location/table, and request metadata.
         _rate_limited (None):
             Dependency marker confirming rate-limit checks have run.
+        device_token (str | None):
+            Opaque browser token from Authorization header or secure cookie.
         tenant_id (int | None):
             Query tenant ID consumed by request-context resolution.
         qr_payload (str | None):
             Query QR payload consumed by request-context resolution.
-        device_token (str | None):
-            Opaque browser token used to recognize the customer.
 
     Returns:
         ProfileResponse:
@@ -240,7 +276,11 @@ async def get_profile(
         session,
         context=_audit_context(context, actor=f"customer:{identity.customer_id}"),
         action="profile_read",
-        payload={"customer_id": identity.customer_id},
+        payload={
+            "customer_id": identity.customer_id,
+            "location_id": context.location_id,
+            "table_id": context.table_id,
+        },
     )
     return ProfileResponse(
         customer_id=profile.customer_id,
@@ -264,9 +304,9 @@ async def delete_profile(
     session: SessionDependency,
     context: RequestContextDependency,
     _rate_limited: RateLimitDependency,
+    device_token: DeviceTokenDependency,
     tenant_id: int | None = Query(default=None),
     qr_payload: str | None = Query(default=None),
-    device_token: str | None = Query(default=None),
 ) -> DeleteProfileResponse:
     """Delete a recognized customer's tenant-scoped durable profile.
 
@@ -274,15 +314,15 @@ async def delete_profile(
         session (AsyncSession):
             Async database session used for deletion and audit write.
         context (RequestContext):
-            Resolved tenant and request metadata from API dependencies.
+            Resolved tenant, optional QR location/table, and request metadata.
         _rate_limited (None):
             Dependency marker confirming rate-limit checks have run.
+        device_token (str | None):
+            Opaque browser token from Authorization header or secure cookie.
         tenant_id (int | None):
             Query tenant ID consumed by request-context resolution.
         qr_payload (str | None):
             Query QR payload consumed by request-context resolution.
-        device_token (str | None):
-            Opaque browser token used to recognize the customer.
 
     Returns:
         DeleteProfileResponse:
@@ -307,7 +347,11 @@ async def delete_profile(
             session,
             context=_audit_context(context, actor=f"customer:{identity.customer_id}"),
             action="profile_deleted",
-            payload={"customer_id": identity.customer_id},
+            payload={
+                "customer_id": identity.customer_id,
+                "location_id": context.location_id,
+                "table_id": context.table_id,
+            },
         )
     return DeleteProfileResponse(deleted=deleted)
 

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cafe_assistant.agent.state_machine import ChatAgent, ChatAgentRequest
 from cafe_assistant.api.deps import (
     RequestContext,
+    device_token_from_request,
     rate_limit_dependency,
     request_context,
 )
@@ -25,16 +26,29 @@ _STATIC_DIR = Path(__file__).parents[3] / "static"
 
 
 class ChatRequest(BaseModel):
+    """Streaming chat request body without durable identity secrets.
+
+    Attributes:
+        session_id (str):
+            Browser session key for short-lived memory.
+        tenant_id (int | None):
+            Direct tenant context for local/dev clients.
+        qr_payload (str | dict[str, Any] | None):
+            QR-derived cafe/location/table context.
+        message (str):
+            Customer message to route through the safety-first agent.
+    """
+
     session_id: str = Field(min_length=1)
     tenant_id: int | None = None
     qr_payload: str | dict[str, Any] | None = None
-    device_token: str | None = None
     message: str = Field(min_length=1)
 
 
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
 RequestContextDependency = Annotated[RequestContext, Depends(request_context)]
 RateLimitDependency = Annotated[None, Depends(rate_limit_dependency)]
+DeviceTokenDependency = Annotated[str | None, Depends(device_token_from_request)]
 
 
 @router.post("/chat")
@@ -43,7 +57,26 @@ async def chat(
     session: SessionDependency,
     context: RequestContextDependency,
     _rate_limited: RateLimitDependency,
+    device_token: DeviceTokenDependency,
 ) -> StreamingResponse:
+    """Run the tenant-scoped chat state machine and stream SSE chunks.
+
+    Args:
+        request (ChatRequest):
+            Session ID, tenant/QR context, and user message.
+        session (AsyncSession):
+            Database session used by the agent and deterministic tools.
+        context (RequestContext):
+            Resolved tenant, optional QR location/table, and trace metadata.
+        _rate_limited (None):
+            Dependency marker confirming rate-limit checks have run.
+        device_token (str | None):
+            Optional durable identity token from approved transports.
+
+    Returns:
+        StreamingResponse:
+            Server-sent-event stream containing response token chunks.
+    """
     del _rate_limited
     start_trace(
         tenant_id=context.tenant_id,
@@ -54,6 +87,16 @@ async def chat(
     agent = ChatAgent(session)
 
     async def event_stream() -> AsyncIterator[str]:
+        """Yield SSE events from the chat agent.
+
+        Args:
+            None:
+                The closure captures the request, context, token, and agent.
+
+        Returns:
+            AsyncIterator[str]:
+                SSE-formatted token and completion events.
+        """
         ok = False
         try:
             async for token in agent.stream_response(
@@ -61,7 +104,9 @@ async def chat(
                     session_id=request.session_id,
                     tenant_id=context.tenant_id,
                     message=request.message,
-                    device_token=request.device_token,
+                    device_token=device_token,
+                    location_id=context.location_id,
+                    table_id=context.table_id,
                     request_id=context.request_id,
                     trace_id=context.trace_id,
                     actor=context.actor,
@@ -85,4 +130,14 @@ async def chat(
 
 @router.get("/chat")
 async def chat_page() -> FileResponse:
+    """Return the minimal browser chat page.
+
+    Args:
+        None:
+            The page path is fixed relative to the package root.
+
+    Returns:
+        FileResponse:
+            Static HTML chat interface.
+    """
     return FileResponse(_STATIC_DIR / "chat.html")

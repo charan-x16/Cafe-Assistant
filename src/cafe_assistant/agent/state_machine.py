@@ -85,6 +85,8 @@ class ChatAgentRequest:
     message: str
     device_token: str | None = None
     customer_id: int | None = None
+    location_id: int | None = None
+    table_id: str | None = None
     request_id: str = "internal"
     trace_id: str = "internal"
     actor: str = "anonymous"
@@ -778,6 +780,8 @@ class ChatAgent:
                         "customer_id": customer_id,
                         "persisted_kinds": [write.kind.value for write in result.persisted],
                         "skipped_kinds": [write.kind.value for write in result.skipped],
+                        "location_id": request.location_id,
+                        "table_id": request.table_id,
                     },
                 )
 
@@ -809,6 +813,8 @@ class ChatAgent:
                 "item_ids": [item.id for item in prepared.safe_items],
                 "item_names": [item.name for item in prepared.safe_items],
                 "customer_id": prepared.customer_id,
+                "location_id": request.location_id,
+                "table_id": request.table_id,
             },
         )
 

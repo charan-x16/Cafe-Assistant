@@ -1,3 +1,12 @@
+"""QR payload parsing for cafe, location, and table context.
+
+QR codes are intentionally not identity-bearing credentials. They may contain
+only cafe_id, location_id, and table_id values that stamp tenant/location/table
+context at the API gateway. This module validates the payload shape and scalar
+formats; database ownership validation happens in `api.deps` because it needs an
+async database session.
+"""
+
 from __future__ import annotations
 
 import json
@@ -11,17 +20,39 @@ _TABLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class InvalidQrPayloadError(ValueError):
-    pass
+    """Raised when a QR payload has missing, extra, or malformed fields."""
 
 
 @dataclass(frozen=True, slots=True)
 class TenantContext:
+    """Parsed context values carried by a table QR code.
+
+    Attributes:
+        tenant_id (int):
+            Cafe/tenant identifier from the QR cafe_id field.
+        location_id (int):
+            Location identifier from the QR location_id field.
+        table_id (str):
+            Non-secret table identifier used for in-cafe context.
+    """
+
     tenant_id: int
     location_id: int
     table_id: str
 
 
 def parse_tenant_context(payload: str | Mapping[str, object]) -> TenantContext:
+    """Parse and validate a QR payload into tenant/location/table context.
+
+    Args:
+        payload (str | Mapping[str, object]):
+            QR payload as a JSON object string, URL/query string, or mapping.
+            The payload must contain exactly cafe_id, location_id, and table_id.
+
+    Returns:
+        TenantContext:
+            Parsed positive integer tenant/location IDs and normalized table ID.
+    """
     raw = _coerce_payload(payload)
     keys = set(raw)
     if keys != _ALLOWED_QR_KEYS:
@@ -44,6 +75,16 @@ def parse_tenant_context(payload: str | Mapping[str, object]) -> TenantContext:
 
 
 def _coerce_payload(payload: str | Mapping[str, object]) -> dict[str, object]:
+    """Coerce supported QR encodings into a plain dictionary.
+
+    Args:
+        payload (str | Mapping[str, object]):
+            Mapping, JSON object string, full URL, or query-string payload.
+
+    Returns:
+        dict[str, object]:
+            Dictionary form used by `parse_tenant_context` validation.
+    """
     if isinstance(payload, Mapping):
         return dict(payload)
 
@@ -67,6 +108,18 @@ def _coerce_payload(payload: str | Mapping[str, object]) -> dict[str, object]:
 
 
 def _positive_int(value: object, field_name: str) -> int:
+    """Parse one QR field as a positive integer.
+
+    Args:
+        value (object):
+            Raw field value from the QR payload.
+        field_name (str):
+            Field name used in validation errors.
+
+    Returns:
+        int:
+            Positive integer value.
+    """
     try:
         parsed = int(str(value))
     except ValueError as exc:

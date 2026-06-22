@@ -22,6 +22,7 @@ from cafe_assistant.db.models import (
     Consent,
     CustomerProfile,
     EpisodicEvent,
+    Location,
     MenuItem,
     Tenant,
 )
@@ -252,12 +253,148 @@ async def test_cross_tenant_profile_access_is_denied(
     ) as client:
         response = await client.get(
             "/identity/profile",
-            params={"tenant_id": other_tenant_id, "device_token": token},
+            params={"tenant_id": other_tenant_id},
+            headers={"Authorization": f"Bearer {token}"},
         )
 
     app.dependency_overrides.clear()
     assert response.status_code == 404
 
+
+async def test_profile_access_accepts_authorization_header(
+    security_session: tuple[AsyncSession, int, int],
+) -> None:
+    """Verify profile access uses the approved Bearer-token transport.
+
+    Args:
+        security_session (tuple[AsyncSession, int, int]):
+            Seeded session and tenant IDs used to create and read a profile.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    session, tenant_id, _other_tenant_id = security_session
+    token = await _create_profile(session, tenant_id)
+    app = _app_with_session(session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(
+            "/identity/profile",
+            params={"tenant_id": tenant_id},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json()["tenant_id"] == tenant_id
+
+
+async def test_profile_query_device_token_is_rejected(
+    security_session: tuple[AsyncSession, int, int],
+) -> None:
+    """Verify device tokens are rejected when sent in URL query params.
+
+    Args:
+        security_session (tuple[AsyncSession, int, int]):
+            Seeded session and tenant IDs used to create a profile token.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    session, tenant_id, _other_tenant_id = security_session
+    token = await _create_profile(session, tenant_id)
+    app = _app_with_session(session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(
+            "/identity/profile",
+            params={"tenant_id": tenant_id, "device_token": token},
+        )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 400
+    assert "Authorization" in response.json()["detail"]
+
+
+async def test_qr_location_tenant_mismatch_is_rejected(
+    security_session: tuple[AsyncSession, int, int],
+) -> None:
+    """Verify QR location IDs must belong to the QR cafe/tenant ID.
+
+    Args:
+        security_session (tuple[AsyncSession, int, int]):
+            Seeded session containing a primary tenant/location and another tenant.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    session, tenant_id, other_tenant_id = security_session
+    location_id = await session.scalar(select(Location.id).where(Location.tenant_id == tenant_id))
+    assert location_id is not None
+    app = _app_with_session(session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/identity/otp/start",
+            json={
+                "qr_payload": {
+                    "cafe_id": other_tenant_id,
+                    "location_id": location_id,
+                    "table_id": "A12",
+                },
+                "phone": "+15555550122",
+            },
+        )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 400
+    assert "location" in response.json()["detail"].lower()
+
+
+async def test_invalid_consent_scope_is_rejected(
+    security_session: tuple[AsyncSession, int, int],
+) -> None:
+    """Verify OTP start rejects consent scopes outside the allowlist.
+
+    Args:
+        security_session (tuple[AsyncSession, int, int]):
+            Seeded session and tenant IDs used to call the API.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    session, tenant_id, _other_tenant_id = security_session
+    app = _app_with_session(session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/identity/otp/start",
+            json={
+                "tenant_id": tenant_id,
+                "phone": "+15555550123",
+                "scopes": ["marketing"],
+            },
+        )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 400
+    assert "Unsupported consent scope" in response.json()["detail"]
 
 async def test_prompt_injection_in_user_or_menu_content_is_neutralized(
     security_session: tuple[AsyncSession, int, int],
@@ -368,7 +505,8 @@ async def test_profile_deletion_purges_customer_memory_rows(
     ) as client:
         response = await client.delete(
             "/identity/profile",
-            params={"tenant_id": tenant_id, "device_token": token},
+            params={"tenant_id": tenant_id},
+            headers={"Authorization": f"Bearer {token}"},
         )
 
     app.dependency_overrides.clear()
