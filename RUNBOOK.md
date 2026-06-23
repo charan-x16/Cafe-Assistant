@@ -98,24 +98,23 @@ uv run python evals/allergen_safety.py
 
 ## Canary and Shadow Traffic
 
-Start canary:
+Start canary and run remote shadow checks when a canary URL is available:
 
 ```bash
-IMAGE="$NEW_IMAGE" CANARY_REPLICAS=1 deploy/release.sh
+IMAGE="$NEW_IMAGE" CANARY_REPLICAS=1 CANARY_URL="$CANARY_URL" TENANT_ID=1 deploy/release.sh
 ```
 
-Run shadow traffic:
+Run shadow traffic manually if `CANARY_URL` was not supplied to `deploy/release.sh`:
 
 ```bash
 TARGET_URL="$CANARY_URL" TENANT_ID=1 uv run python deploy/shadow_traffic.py
 ```
 
-Promote:
+Promote only after shadow traffic, strict evals, and required load checks pass:
 
 ```bash
-IMAGE="$NEW_IMAGE" deploy/promote.sh
+IMAGE="$NEW_IMAGE" CANARY_URL="$CANARY_URL" TENANT_ID=1 deploy/promote.sh
 ```
-
 Abort:
 
 ```bash
@@ -154,10 +153,10 @@ deploy/rollback.sh
 - Standalone hard gate: `uv run python evals/allergen_safety.py`
   Acceptance: exits zero with `false_negative_count=0`.
 - Compose validation: `docker compose config` and
-  `docker compose -f deploy/docker-compose.prod.yml config`
-  Acceptance: both render valid config.
-- Canary release: `IMAGE=$NEW_IMAGE deploy/release.sh`
-  Acceptance: canary rollout reaches ready state and shadow traffic passes.
+  `docker compose -f deploy/docker-compose.prod.yml config` with required production env placeholders.
+  Acceptance: both render valid config and production config resolves BGE, Qdrant, OpenAI, and required secrets.
+- Canary release: `IMAGE=$NEW_IMAGE CANARY_URL=$CANARY_URL deploy/release.sh`
+  Acceptance: canary rollout reaches ready state, health passes, and shadow traffic passes against legacy plus BTB adversarial cases.
 - Rollback drill: `deploy/rollback.sh`
   Acceptance: stable deployment returns to last known good image and health checks
   pass.

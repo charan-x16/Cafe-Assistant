@@ -17,4 +17,17 @@ jobs:
       - run: uv sync --extra dev
       - run: uv run ruff check . --no-cache
       - run: uv run pytest -q
-      - run: uv run python evals/run_evals.py
+      - run: uv run python evals/run_evals.py --strict
+      - run: uv run alembic upgrade head --sql
+      - name: Validate production Compose config
+        env:
+          POSTGRES_PASSWORD: ci-postgres-password
+          QDRANT_URL: https://qdrant.invalid
+          QDRANT_API_KEY: ci-qdrant-key
+          LLM_API_KEY: ci-llm-key
+          IDENTITY_PHONE_HASH_SECRET: ci-phone-hash-secret
+          IDENTITY_OTP_HASH_SECRET: ci-otp-hash-secret
+          IDENTITY_DEVICE_TOKEN_HASH_SECRET: ci-device-token-secret
+          RATE_LIMIT_HASH_SECRET: ci-rate-limit-secret
+          OBSERVABILITY_ADMIN_TOKEN: ci-observability-token
+        run: docker compose -f deploy/docker-compose.prod.yml config

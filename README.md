@@ -824,10 +824,10 @@ uv run ruff check . --no-cache
 uv run pytest -q
 uv run python evals/run_evals.py --strict
 uv run alembic upgrade head --sql
-docker compose config
+docker compose -f deploy/docker-compose.prod.yml config
 ```
 
-The CI workflow runs lint, tests, and evals. Allergen safety is a hard gate.
+The CI workflow runs lint, tests, strict evals, Alembic SQL rendering, and production Compose validation. Allergen safety is a hard gate.
 
 ## Deployment
 
@@ -841,13 +841,22 @@ docker build -f deploy/Containerfile -t cafe-assistant:local .
 
 ### Production Compose
 
-Production Compose requires a non-empty Postgres password:
+Production Compose requires database, Qdrant, LLM, and security secret values:
 
 ```bash
-POSTGRES_PASSWORD=replace-me docker compose -f deploy/docker-compose.prod.yml config
-POSTGRES_PASSWORD=replace-me docker compose -f deploy/docker-compose.prod.yml up -d
-```
+export POSTGRES_PASSWORD=replace-me
+export QDRANT_URL=https://your-qdrant-cluster
+export QDRANT_API_KEY=replace-me
+export LLM_API_KEY=replace-me
+export IDENTITY_PHONE_HASH_SECRET=replace-me
+export IDENTITY_OTP_HASH_SECRET=replace-me
+export IDENTITY_DEVICE_TOKEN_HASH_SECRET=replace-me
+export RATE_LIMIT_HASH_SECRET=replace-me
+export OBSERVABILITY_ADMIN_TOKEN=replace-me
 
+docker compose -f deploy/docker-compose.prod.yml config
+docker compose -f deploy/docker-compose.prod.yml up -d
+```
 Production Compose includes:
 
 - API service
@@ -866,7 +875,7 @@ Manifests live in `deploy/k8s/`:
 - secret example
 - Postgres and Redis
 - stable and canary API deployments
-- service
+- separate stable and canary services
 - cleanup worker
 
 Apply manifests:
@@ -877,24 +886,23 @@ kubectl apply -f deploy/k8s/
 
 ### Release, Canary, Promotion, Rollback
 
-Start canary:
+Start canary and run remote shadow checks when a canary URL is available:
 
 ```bash
-IMAGE=ghcr.io/org/cafe-assistant:<tag> deploy/release.sh
+IMAGE=ghcr.io/org/cafe-assistant:<tag> CANARY_URL=http://<canary-url> TENANT_ID=1 deploy/release.sh
 ```
 
-Run shadow traffic:
+Run shadow traffic manually. By default it covers both legacy and BTB adversarial datasets:
 
 ```bash
 TARGET_URL=http://<canary-url> TENANT_ID=1 uv run python deploy/shadow_traffic.py
 ```
 
-Promote:
+Promote after shadow traffic, strict evals, and any required load checks pass:
 
 ```bash
-IMAGE=ghcr.io/org/cafe-assistant:<tag> deploy/promote.sh
+IMAGE=ghcr.io/org/cafe-assistant:<tag> CANARY_URL=http://<canary-url> TENANT_ID=1 deploy/promote.sh
 ```
-
 Rollback:
 
 ```bash

@@ -5,13 +5,27 @@ services:
       context: ..
       dockerfile: deploy/Containerfile
     command: uvicorn cafe_assistant.main:app --host 0.0.0.0 --port 8000 --workers 2
-    env_file:
-      - path: ../.env
-        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cafe}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cafe_assistant}
       REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: production
+      EMBEDDING_PROVIDER: sentence_transformer
+      EMBEDDING_MODEL_NAME: BAAI/bge-small-en-v1.5
+      EMBEDDING_DIMENSION: "384"
+      VECTOR_PROVIDER: qdrant
+      QDRANT_URL: ${QDRANT_URL:?set QDRANT_URL}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-cafe_assistant_menu_policy}
+      LLM_PROVIDER: openai
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_API_KEY: ${LLM_API_KEY:?set LLM_API_KEY}
+      CHEAP_CHAT_PROVIDER: llm
+      STRONG_CHAT_PROVIDER: llm
+      IDENTITY_PHONE_HASH_SECRET: ${IDENTITY_PHONE_HASH_SECRET:?set IDENTITY_PHONE_HASH_SECRET}
+      IDENTITY_OTP_HASH_SECRET: ${IDENTITY_OTP_HASH_SECRET:?set IDENTITY_OTP_HASH_SECRET}
+      IDENTITY_DEVICE_TOKEN_HASH_SECRET: ${IDENTITY_DEVICE_TOKEN_HASH_SECRET:?set IDENTITY_DEVICE_TOKEN_HASH_SECRET}
+      RATE_LIMIT_HASH_SECRET: ${RATE_LIMIT_HASH_SECRET:?set RATE_LIMIT_HASH_SECRET}
+      OBSERVABILITY_ADMIN_TOKEN: ${OBSERVABILITY_ADMIN_TOKEN:?set OBSERVABILITY_ADMIN_TOKEN}
     depends_on:
       postgres:
         condition: service_healthy
@@ -36,13 +50,15 @@ services:
   worker:
     image: ${CAFE_ASSISTANT_IMAGE:-cafe-assistant:latest}
     command: python scripts/cleanup_retention.py
-    env_file:
-      - path: ../.env
-        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cafe}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cafe_assistant}
       REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: production
+      IDENTITY_PHONE_HASH_SECRET: ${IDENTITY_PHONE_HASH_SECRET:?set IDENTITY_PHONE_HASH_SECRET}
+      IDENTITY_OTP_HASH_SECRET: ${IDENTITY_OTP_HASH_SECRET:?set IDENTITY_OTP_HASH_SECRET}
+      IDENTITY_DEVICE_TOKEN_HASH_SECRET: ${IDENTITY_DEVICE_TOKEN_HASH_SECRET:?set IDENTITY_DEVICE_TOKEN_HASH_SECRET}
+      RATE_LIMIT_HASH_SECRET: ${RATE_LIMIT_HASH_SECRET:?set RATE_LIMIT_HASH_SECRET}
+      OBSERVABILITY_ADMIN_TOKEN: ${OBSERVABILITY_ADMIN_TOKEN:?set OBSERVABILITY_ADMIN_TOKEN}
     depends_on:
       postgres:
         condition: service_healthy
