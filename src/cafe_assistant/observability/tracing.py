@@ -526,10 +526,6 @@ class LangfuseClient:
             _record_observability_failure("langfuse_export", exc)
 
 
-_trace_store = TraceStore(max_traces=settings.trace_store_max_traces)
-_langfuse_client = LangfuseClient()
-
-
 def get_trace_store() -> TraceStore:
     """Return the process-wide trace store.
 
@@ -772,3 +768,7 @@ def _float_value(value: Any, *, default: float) -> float:
     """
     parsed = _optional_float(value)
     return default if parsed is None else parsed
+
+
+_trace_store = TraceStore(max_traces=settings.trace_store_max_traces)
+_langfuse_client = LangfuseClient()

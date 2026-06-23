@@ -3,67 +3,241 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Cafe Assistant</title>
+    <title>By The Brew Assistant</title>
     <style>
       :root {
-        --ink: #20211d;
-        --paper: #fbf7ee;
-        --line: #c8bda8;
-        --accent: #1f7a68;
-        --accent-dark: #145345;
-        --warn: #8b3f26;
+        --ink: #161815;
+        --muted: #687069;
+        --canvas: #f5f6f1;
+        --surface: #fffefa;
+        --surface-strong: #f0f3ec;
+        --line: #d4d9cf;
+        --line-strong: #9ca894;
+        --forest: #245548;
+        --forest-dark: #173b32;
+        --leaf: #7a9a62;
+        --berry: #9f2f42;
+        --copper: #b66d36;
+        --shadow: 0 24px 70px rgba(22, 24, 21, 0.14);
+        --radius: 8px;
       }
 
       * {
         box-sizing: border-box;
       }
 
+      html {
+        min-height: 100%;
+        background: var(--canvas);
+      }
+
       body {
         margin: 0;
         min-height: 100vh;
-        background:
-          linear-gradient(90deg, rgba(32, 33, 29, 0.05) 1px, transparent 1px),
-          linear-gradient(rgba(32, 33, 29, 0.05) 1px, transparent 1px),
-          var(--paper);
-        background-size: 28px 28px;
         color: var(--ink);
-        font-family: Georgia, "Times New Roman", serif;
+        font-family:
+          "Aptos",
+          "Segoe UI",
+          Candara,
+          sans-serif;
+        background:
+          linear-gradient(135deg, rgba(36, 85, 72, 0.08) 0 1px, transparent 1px 18px),
+          radial-gradient(circle at 8% 12%, rgba(182, 109, 54, 0.18), transparent 28%),
+          radial-gradient(circle at 92% 88%, rgba(122, 154, 98, 0.18), transparent 26%),
+          var(--canvas);
       }
 
-      main {
-        width: min(920px, calc(100vw - 32px));
-        margin: 0 auto;
-        padding: 32px 0;
+      button,
+      input {
+        font: inherit;
       }
 
-      header {
+      button {
+        cursor: pointer;
+      }
+
+      button:focus-visible,
+      input:focus-visible {
+        outline: 3px solid rgba(159, 47, 66, 0.26);
+        outline-offset: 2px;
+      }
+
+      .app-shell {
+        width: min(1180px, calc(100vw - 32px));
+        min-height: calc(100vh - 32px);
+        margin: 16px auto;
+        display: grid;
+        grid-template-columns: 290px minmax(0, 1fr);
+        overflow: hidden;
+        border: 1px solid rgba(22, 24, 21, 0.14);
+        border-radius: var(--radius);
+        background: rgba(255, 254, 250, 0.88);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+      }
+
+      .side-panel {
+        position: relative;
         display: flex;
+        flex-direction: column;
         justify-content: space-between;
-        align-items: end;
-        gap: 20px;
-        border-bottom: 2px solid var(--ink);
-        padding-bottom: 18px;
+        gap: 28px;
+        padding: 28px;
+        color: #f9fbf5;
+        background:
+          linear-gradient(180deg, rgba(23, 59, 50, 0.96), rgba(31, 44, 38, 0.98)),
+          repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.04) 0 1px, transparent 1px 11px);
       }
 
-      h1 {
-        margin: 0;
-        font-size: clamp(2rem, 5vw, 4.8rem);
+      .side-panel::after {
+        content: "";
+        position: absolute;
+        inset: auto 28px 150px 28px;
+        height: 1px;
+        background: rgba(255, 255, 255, 0.2);
+      }
+
+      .brand-mark {
+        width: 52px;
+        height: 52px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(255, 255, 255, 0.34);
+        border-radius: 50%;
+        color: #fffefa;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 1.1rem;
+        background: rgba(255, 255, 255, 0.08);
+      }
+
+      .brand h1 {
+        margin: 24px 0 10px;
+        max-width: 9ch;
+        font-family: Georgia, "Iowan Old Style", serif;
+        font-size: clamp(2.4rem, 6vw, 4.2rem);
         line-height: 0.9;
+        font-weight: 700;
         letter-spacing: 0;
       }
 
-      .status {
-        font: 700 0.78rem/1.2 ui-monospace, "Cascadia Mono", monospace;
-        text-transform: uppercase;
-        color: var(--accent-dark);
-        border: 1px solid var(--line);
-        padding: 8px 10px;
+      .brand p {
+        margin: 0;
+        max-width: 22ch;
+        color: rgba(249, 251, 245, 0.74);
+        line-height: 1.45;
       }
 
-      .status-row {
+      .signal-stack {
         display: grid;
-        justify-items: end;
+        gap: 10px;
+      }
+
+      .signal {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        min-height: 44px;
+        padding: 10px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+        color: rgba(249, 251, 245, 0.72);
+        font-size: 0.82rem;
+      }
+
+      .signal strong {
+        color: #fffefa;
+        font-size: 0.9rem;
+        font-weight: 800;
+      }
+
+      .main-panel {
+        min-width: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        background: linear-gradient(180deg, rgba(255, 254, 250, 0.94), rgba(245, 246, 241, 0.96));
+      }
+
+      .top-bar {
+        min-height: 88px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        padding: 18px 22px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .top-title {
+        min-width: 0;
+      }
+
+      .top-title h2 {
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", serif;
+        font-size: clamp(1.35rem, 3vw, 2.2rem);
+        line-height: 1.05;
+        letter-spacing: 0;
+      }
+
+      .top-title p {
+        margin: 7px 0 0;
+        color: var(--muted);
+        line-height: 1.35;
+      }
+
+      .controls {
+        display: flex;
+        align-items: center;
+        justify-content: end;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .tenant-control {
+        display: flex;
+        align-items: center;
         gap: 8px;
+        min-height: 38px;
+        padding: 6px 8px 6px 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        color: var(--muted);
+        font-size: 0.82rem;
+        font-weight: 700;
+      }
+
+      #tenant-input {
+        width: 58px;
+        min-height: 28px;
+        padding: 0 8px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        background: var(--surface-strong);
+        color: var(--ink);
+        font-weight: 800;
+      }
+
+      .status-pill {
+        min-height: 38px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 12px;
+        border: 1px solid rgba(36, 85, 72, 0.22);
+        border-radius: var(--radius);
+        background: rgba(36, 85, 72, 0.08);
+        color: var(--forest-dark);
+        font-size: 0.82rem;
+        font-weight: 800;
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--leaf);
+        box-shadow: 0 0 0 5px rgba(122, 154, 98, 0.18);
       }
 
       .memory-actions {
@@ -75,59 +249,148 @@
         display: flex;
       }
 
-      .memory-actions button {
-        min-height: 32px;
-        padding: 0 10px;
-        background: transparent;
-        color: var(--accent-dark);
+      .icon-button {
+        min-height: 38px;
+        min-width: 38px;
         border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        color: var(--forest-dark);
+        font-weight: 900;
       }
 
-      .memory-actions button:hover {
-        color: white;
-        background: var(--accent-dark);
+      .icon-button:hover {
+        border-color: var(--forest);
+        background: var(--forest);
+        color: #fffefa;
+      }
+
+      .conversation {
+        min-height: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 0;
+      }
+
+      .quick-prompts {
+        display: flex;
+        gap: 10px;
+        padding: 16px 22px 0;
+        overflow-x: auto;
+      }
+
+      .quick-prompts button {
+        flex: 0 0 auto;
+        min-height: 36px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        color: var(--forest-dark);
+        padding: 0 12px;
+        font-size: 0.84rem;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .quick-prompts button:hover {
+        border-color: var(--copper);
+        color: var(--berry);
       }
 
       #messages {
-        display: grid;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
         gap: 14px;
-        min-height: 54vh;
-        align-content: end;
-        padding: 24px 0;
+        overflow-y: auto;
+        padding: 22px;
+        scroll-behavior: smooth;
+      }
+
+      .empty-state {
+        margin: auto;
+        width: min(520px, 100%);
+        display: grid;
+        gap: 18px;
+        text-align: center;
+        color: var(--muted);
+      }
+
+      .empty-state .stamp {
+        width: 86px;
+        height: 86px;
+        margin: 0 auto;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line-strong);
+        border-radius: 50%;
+        color: var(--forest-dark);
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 1.9rem;
+        background: rgba(255, 254, 250, 0.8);
+      }
+
+      .empty-state p {
+        margin: 0;
+        line-height: 1.5;
       }
 
       .message {
-        max-width: 76%;
+        width: fit-content;
+        max-width: min(680px, 82%);
         border: 1px solid var(--line);
-        background: rgba(255, 252, 245, 0.86);
+        border-radius: var(--radius);
         padding: 14px 16px;
-        line-height: 1.42;
+        line-height: 1.48;
+        white-space: pre-wrap;
+        word-break: break-word;
+        animation: rise-in 180ms ease-out both;
       }
 
       .message.user {
-        justify-self: end;
-        background: #20352f;
-        color: #fffaf0;
-        border-color: #20352f;
+        align-self: flex-end;
+        color: #fffefa;
+        border-color: var(--forest-dark);
+        background: linear-gradient(135deg, var(--forest), var(--forest-dark));
       }
 
       .message.assistant {
-        justify-self: start;
+        align-self: flex-start;
+        background: var(--surface);
+        color: var(--ink);
       }
 
-      form {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 10px;
-        border-top: 2px solid var(--ink);
-        padding-top: 16px;
+      .message.system {
+        align-self: center;
+        max-width: min(560px, 100%);
+        color: var(--berry);
+        border-color: rgba(159, 47, 66, 0.24);
+        background: rgba(159, 47, 66, 0.06);
+        text-align: center;
+      }
+
+      .message.streaming::after {
+        content: "";
+        display: inline-block;
+        width: 7px;
+        height: 1.1em;
+        margin-left: 4px;
+        vertical-align: -0.18em;
+        background: var(--copper);
+        animation: blink 1s steps(2, start) infinite;
+      }
+
+      .composer-area {
+        border-top: 1px solid var(--line);
+        background: rgba(255, 254, 250, 0.92);
       }
 
       .memory-panel {
         display: none;
-        margin-bottom: 14px;
-        border: 1px solid var(--ink);
-        background: #fffdf7;
+        margin: 16px 22px 0;
+        border: 1px solid rgba(182, 109, 54, 0.3);
+        border-radius: var(--radius);
+        background: linear-gradient(135deg, rgba(182, 109, 54, 0.09), rgba(122, 154, 98, 0.08));
         padding: 14px;
       }
 
@@ -138,121 +401,235 @@
 
       .memory-panel p {
         margin: 0;
-        line-height: 1.35;
+        color: var(--forest-dark);
+        line-height: 1.4;
+        font-weight: 700;
       }
 
-      .memory-panel .memory-fields {
+      .memory-fields,
+      .otp-fields {
         display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 8px;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
       }
 
-      .memory-panel .otp-fields {
+      .otp-fields {
         display: none;
-        grid-template-columns: 1fr auto;
-        gap: 8px;
       }
 
-      .memory-panel .otp-fields.visible {
+      .otp-fields.visible {
         display: grid;
       }
 
-      .memory-panel .secondary {
-        background: transparent;
-        color: var(--warn);
-        border: 1px solid var(--line);
+      .composer-form {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        padding: 16px 22px 22px;
       }
 
       input {
         width: 100%;
         min-height: 48px;
         border: 1px solid var(--line);
-        background: #fffdf7;
+        border-radius: var(--radius);
+        background: var(--surface);
         color: var(--ink);
         padding: 0 14px;
-        font: 1rem/1.2 ui-sans-serif, Candara, "Trebuchet MS", sans-serif;
       }
 
-      button {
+      input::placeholder {
+        color: #8a928b;
+      }
+
+      .primary-button,
+      .secondary-button {
         min-height: 48px;
-        border: 0;
-        background: var(--accent);
-        color: white;
+        border-radius: var(--radius);
         padding: 0 18px;
-        font: 800 0.82rem/1 ui-monospace, "Cascadia Mono", monospace;
-        text-transform: uppercase;
-        cursor: pointer;
+        font-weight: 900;
       }
 
-      button:hover {
-        background: var(--accent-dark);
+      .primary-button {
+        border: 1px solid var(--forest);
+        background: var(--forest);
+        color: #fffefa;
+      }
+
+      .primary-button:hover {
+        background: var(--forest-dark);
+      }
+
+      .secondary-button {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--berry);
+      }
+
+      .secondary-button:hover {
+        border-color: var(--berry);
       }
 
       button:disabled {
-        background: var(--line);
+        opacity: 0.58;
         cursor: wait;
       }
 
-      @media (max-width: 640px) {
-        header {
-          align-items: start;
+      @keyframes rise-in {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      @media (max-width: 860px) {
+        .app-shell {
+          width: 100%;
+          min-height: 100vh;
+          margin: 0;
+          grid-template-columns: 1fr;
+          border: 0;
+          border-radius: 0;
+        }
+
+        .side-panel {
+          display: none;
+        }
+
+        .top-bar {
+          align-items: flex-start;
           flex-direction: column;
         }
 
-        .status-row {
-          justify-items: start;
+        .controls {
+          justify-content: start;
+        }
+      }
+
+      @media (max-width: 620px) {
+        .top-bar,
+        #messages,
+        .quick-prompts,
+        .composer-form {
+          padding-left: 14px;
+          padding-right: 14px;
+        }
+
+        .memory-panel {
+          margin-left: 14px;
+          margin-right: 14px;
         }
 
         .message {
-          max-width: 92%;
+          max-width: 94%;
         }
 
-        form,
-        .memory-panel .memory-fields,
-        .memory-panel .otp-fields {
+        .composer-form,
+        .memory-fields,
+        .otp-fields {
           grid-template-columns: 1fr;
+        }
+
+        .primary-button,
+        .secondary-button {
+          width: 100%;
         }
       }
     </style>
   </head>
   <body>
-    <main>
-      <header>
-        <h1>Cafe Assistant</h1>
-        <div class="status-row">
-          <div class="status">Safety filter on</div>
-          <div id="memory-actions" class="memory-actions">
-            <button id="view-profile-button" type="button">Profile</button>
-            <button id="forget-profile-button" type="button">Forget</button>
+    <main class="app-shell">
+      <aside class="side-panel" aria-label="Cafe assistant status">
+        <section class="brand">
+          <div class="brand-mark" aria-hidden="true">BTB</div>
+          <h1>By The Brew</h1>
+          <p>Menu guidance with deterministic dietary and allergen checks.</p>
+        </section>
+        <section class="signal-stack" aria-label="Runtime signals">
+          <div class="signal"><span>Safety gate</span><strong>On</strong></div>
+          <div class="signal"><span>Menu source</span><strong>Catalog</strong></div>
+          <div class="signal"><span>Memory</span><strong id="memory-state">Session</strong></div>
+        </section>
+      </aside>
+
+      <section class="main-panel">
+        <header class="top-bar">
+          <div class="top-title">
+            <h2>Menu Assistant</h2>
+            <p>Grounded answers from the current cafe catalog.</p>
           </div>
-        </div>
-      </header>
-      <section id="messages" aria-live="polite"></section>
-      <section id="memory-panel" class="memory-panel" aria-live="polite">
-        <p id="memory-copy">Remember my preferences for next visit?</p>
-        <div class="memory-fields">
-          <input id="phone-input" name="phone" autocomplete="tel" placeholder="Phone number" />
-          <button id="start-otp-button" type="button">Remember</button>
-        </div>
-        <div id="otp-fields" class="otp-fields">
-          <input id="otp-input" name="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="Code" />
-          <button id="confirm-otp-button" type="button">Confirm</button>
-        </div>
-        <button id="dismiss-memory-button" class="secondary" type="button">Not now</button>
+          <div class="controls">
+            <label class="tenant-control" for="tenant-input">
+              Tenant
+              <input id="tenant-input" inputmode="numeric" autocomplete="off" aria-label="Tenant ID" />
+            </label>
+            <div class="status-pill"><span class="status-dot" aria-hidden="true"></span>Safety filter on</div>
+            <div id="memory-actions" class="memory-actions">
+              <button id="view-profile-button" class="icon-button" type="button" title="View remembered profile" aria-label="View remembered profile">P</button>
+              <button id="forget-profile-button" class="icon-button" type="button" title="Forget remembered profile" aria-label="Forget remembered profile">X</button>
+            </div>
+          </div>
+        </header>
+
+        <section class="conversation">
+          <div class="quick-prompts" aria-label="Quick prompts">
+            <button type="button" data-prompt="What lattes do you have today?">Lattes</button>
+            <button type="button" data-prompt="I am allergic to peanuts. What can I safely order?">Peanut allergy</button>
+            <button type="button" data-prompt="Show me vegan options.">Vegan</button>
+            <button type="button" data-prompt="I want something low sugar.">Low sugar</button>
+          </div>
+
+          <section id="messages" aria-live="polite">
+            <div class="empty-state" id="empty-state">
+              <div class="stamp" aria-hidden="true">BTB</div>
+              <p>Ask about drinks, pastries, sandwiches, ingredients, or dietary fit.</p>
+            </div>
+          </section>
+        </section>
+
+        <section class="composer-area">
+          <section id="memory-panel" class="memory-panel" aria-live="polite">
+            <p id="memory-copy">Remember preferences for the next visit?</p>
+            <div class="memory-fields">
+              <input id="phone-input" name="phone" autocomplete="tel" placeholder="Phone number" />
+              <button id="start-otp-button" class="primary-button" type="button">Remember</button>
+            </div>
+            <div id="otp-fields" class="otp-fields">
+              <input id="otp-input" name="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="Code" />
+              <button id="confirm-otp-button" class="primary-button" type="button">Confirm</button>
+            </div>
+            <button id="dismiss-memory-button" class="secondary-button" type="button">Not now</button>
+          </section>
+
+          <form id="chat-form" class="composer-form">
+            <input id="message-input" name="message" autocomplete="off" placeholder="Ask about the menu" />
+            <button id="send-button" class="primary-button" type="submit">Send</button>
+          </form>
+        </section>
       </section>
-      <form id="chat-form">
-        <input id="message-input" name="message" autocomplete="off" placeholder="Ask about the menu" />
-        <button id="send-button" type="submit">Send</button>
-      </form>
     </main>
+
     <script>
       const messages = document.querySelector("#messages");
+      const emptyState = document.querySelector("#empty-state");
       const form = document.querySelector("#chat-form");
       const input = document.querySelector("#message-input");
       const button = document.querySelector("#send-button");
+      const tenantInput = document.querySelector("#tenant-input");
       const memoryPanel = document.querySelector("#memory-panel");
       const memoryCopy = document.querySelector("#memory-copy");
       const memoryActions = document.querySelector("#memory-actions");
+      const memoryState = document.querySelector("#memory-state");
       const phoneInput = document.querySelector("#phone-input");
       const otpInput = document.querySelector("#otp-input");
       const otpFields = document.querySelector("#otp-fields");
@@ -261,21 +638,44 @@
       const dismissMemoryButton = document.querySelector("#dismiss-memory-button");
       const viewProfileButton = document.querySelector("#view-profile-button");
       const forgetProfileButton = document.querySelector("#forget-profile-button");
+      const quickPromptButtons = document.querySelectorAll("[data-prompt]");
       const sessionId = crypto.randomUUID();
-      const tenantId = 1;
       let deviceToken = localStorage.getItem("cafeAssistantDeviceToken") || "";
       let challengeId = "";
       let completedAssistantTurns = 0;
 
+      tenantInput.value = localStorage.getItem("cafeAssistantTenantId") || "3";
       updateMemoryActions();
 
+      function currentTenantId() {
+        const parsed = Number.parseInt(tenantInput.value.trim(), 10);
+        const tenantId = Number.isFinite(parsed) && parsed > 0 ? parsed : 3;
+        tenantInput.value = String(tenantId);
+        localStorage.setItem("cafeAssistantTenantId", String(tenantId));
+        return tenantId;
+      }
+
+      tenantInput.addEventListener("change", currentTenantId);
+
+      quickPromptButtons.forEach((promptButton) => {
+        promptButton.addEventListener("click", () => {
+          input.value = promptButton.dataset.prompt || "";
+          input.focus();
+        });
+      });
+
       function appendMessage(role, text = "") {
+        emptyState?.remove();
         const node = document.createElement("div");
         node.className = `message ${role}`;
         node.textContent = text;
         messages.appendChild(node);
         node.scrollIntoView({ block: "end", behavior: "smooth" });
         return node;
+      }
+
+      function appendSystemMessage(text) {
+        appendMessage("system", text);
       }
 
       form.addEventListener("submit", async (event) => {
@@ -286,7 +686,7 @@
         appendMessage("user", text);
         input.value = "";
         button.disabled = true;
-        const assistantNode = appendMessage("assistant", "");
+        const assistantNode = appendMessage("assistant streaming", "");
 
         try {
           const headers = { "Content-Type": "application/json" };
@@ -296,10 +696,15 @@
             headers,
             body: JSON.stringify({
               session_id: sessionId,
-              tenant_id: tenantId,
+              tenant_id: currentTenantId(),
               message: text,
             }),
           });
+
+          if (!response.ok || !response.body) {
+            throw new Error(await readableError(response));
+          }
+
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
@@ -316,12 +721,14 @@
               const payload = JSON.parse(dataLine.slice(6));
               if (payload.token) {
                 assistantNode.textContent += payload.token;
+                assistantNode.scrollIntoView({ block: "end" });
               }
             }
           }
-        } catch {
-          assistantNode.textContent = "Sorry, I could not reach the cafe assistant.";
+        } catch (error) {
+          assistantNode.textContent = error.message || "Sorry, I could not reach the cafe assistant.";
         } finally {
+          assistantNode.classList.remove("streaming");
           completedAssistantTurns += 1;
           maybeShowMemoryPrompt();
           button.disabled = false;
@@ -337,15 +744,15 @@
           const response = await fetch("/identity/otp/start", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenant_id: tenantId, phone }),
+            body: JSON.stringify({ tenant_id: currentTenantId(), phone }),
           });
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.detail || "Could not start OTP.");
           challengeId = payload.challenge_id;
           otpFields.classList.add("visible");
           memoryCopy.textContent = "Enter the code to remember preferences.";
-        } catch {
-          memoryCopy.textContent = "Could not start the remember flow.";
+        } catch (error) {
+          memoryCopy.textContent = error.message || "Could not start the remember flow.";
         } finally {
           startOtpButton.disabled = false;
         }
@@ -362,7 +769,7 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               session_id: sessionId,
-              tenant_id: tenantId,
+              tenant_id: currentTenantId(),
               phone,
               challenge_id: challengeId,
               code,
@@ -374,8 +781,9 @@
           localStorage.setItem("cafeAssistantDeviceToken", deviceToken);
           memoryPanel.classList.remove("visible");
           updateMemoryActions();
-        } catch {
-          memoryCopy.textContent = "Could not confirm the code.";
+          appendSystemMessage("Preferences can now be remembered for this tenant.");
+        } catch (error) {
+          memoryCopy.textContent = error.message || "Could not confirm the code.";
         } finally {
           confirmOtpButton.disabled = false;
         }
@@ -387,23 +795,27 @@
 
       viewProfileButton.addEventListener("click", async () => {
         if (!deviceToken) return;
-        const response = await fetch(`/identity/profile?tenant_id=${tenantId}`, {
+        const response = await fetch(`/identity/profile?tenant_id=${currentTenantId()}`, {
           headers: { Authorization: `Bearer ${deviceToken}` },
         });
-        if (!response.ok) return;
+        if (!response.ok) {
+          appendSystemMessage("Could not load remembered profile.");
+          return;
+        }
         const profile = await response.json();
         appendMessage("assistant", `Remembered profile: ${JSON.stringify(profile.preferences)}`);
       });
 
       forgetProfileButton.addEventListener("click", async () => {
         if (!deviceToken) return;
-        await fetch(`/identity/profile?tenant_id=${tenantId}`, {
+        await fetch(`/identity/profile?tenant_id=${currentTenantId()}`, {
           method: "DELETE",
           headers: { Authorization: `Bearer ${deviceToken}` },
         });
         localStorage.removeItem("cafeAssistantDeviceToken");
         deviceToken = "";
         updateMemoryActions();
+        appendSystemMessage("Remembered profile removed from this browser.");
       });
 
       function maybeShowMemoryPrompt() {
@@ -412,7 +824,18 @@
       }
 
       function updateMemoryActions() {
-        memoryActions.classList.toggle("visible", Boolean(deviceToken));
+        const remembered = Boolean(deviceToken);
+        memoryActions.classList.toggle("visible", remembered);
+        memoryState.textContent = remembered ? "Durable" : "Session";
+      }
+
+      async function readableError(response) {
+        try {
+          const payload = await response.json();
+          return payload.detail || "The assistant request failed.";
+        } catch {
+          return "The assistant request failed.";
+        }
       }
     </script>
   </body>
