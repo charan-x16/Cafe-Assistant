@@ -750,7 +750,9 @@
           if (!response.ok) throw new Error(payload.detail || "Could not start OTP.");
           challengeId = payload.challenge_id;
           otpFields.classList.add("visible");
-          memoryCopy.textContent = "Enter the code to remember preferences.";
+          memoryCopy.textContent = payload.debug_code
+            ? `Development OTP code: ${payload.debug_code}`
+            : "Enter the code to remember preferences.";
         } catch (error) {
           memoryCopy.textContent = error.message || "Could not start the remember flow.";
         } finally {

@@ -485,11 +485,17 @@ class LangfuseClient:
         try:
             from langfuse import Langfuse  # type: ignore[import-not-found]
 
-            self._client = Langfuse(
+            client = Langfuse(
                 public_key=settings.langfuse_public_key,
                 secret_key=settings.langfuse_secret_key,
                 host=settings.langfuse_host,
             )
+            if not hasattr(client, "trace"):
+                logger.warning(
+                    "Langfuse SDK does not expose the legacy trace API; export disabled."
+                )
+                return
+            self._client = client
         except Exception as exc:  # noqa: BLE001 - exporter setup must not fail startup.
             self._client = None
             _record_observability_failure("langfuse_init", exc)

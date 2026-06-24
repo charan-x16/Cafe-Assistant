@@ -14,6 +14,7 @@ import json
 import math
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Protocol
 
 import httpx
@@ -323,6 +324,7 @@ class ConfiguredEmbeddingProvider:
         raise ValueError(f"Unsupported embedding provider: {self.provider_name}")
 
 
+@lru_cache(maxsize=1)
 def get_embedding_provider() -> EmbeddingProvider:
     """Build the configured embedding provider for runtime use.
 

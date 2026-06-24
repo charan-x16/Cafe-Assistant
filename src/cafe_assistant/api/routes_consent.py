@@ -62,6 +62,7 @@ class OtpStartResponse(BaseModel):
 
     challenge_id: str
     expires_at: datetime
+    debug_code: str | None = None
 
 
 class OtpConfirmRequest(TenantContextRequest):
@@ -131,7 +132,11 @@ async def start_otp(
         )
     except (OtpError, InvalidConsentScopeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return OtpStartResponse(challenge_id=result.challenge_id, expires_at=result.expires_at)
+    return OtpStartResponse(
+        challenge_id=result.challenge_id,
+        expires_at=result.expires_at,
+        debug_code=result.debug_code,
+    )
 
 
 @router.post("/otp/confirm")

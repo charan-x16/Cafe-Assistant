@@ -96,10 +96,13 @@ class OtpStartResult:
             Opaque challenge identifier returned to the browser.
         expires_at (datetime):
             Time after which the challenge cannot be confirmed.
+        debug_code (str | None):
+            Development-only OTP code returned when the local no-op sender is active.
     """
 
     challenge_id: str
     expires_at: datetime
+    debug_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,7 +356,11 @@ class OtpService:
             ),
         )
         await self.sender.send_otp(normalized_phone, code)
-        return OtpStartResult(challenge_id=challenge_id, expires_at=expires_at)
+        return OtpStartResult(
+            challenge_id=challenge_id,
+            expires_at=expires_at,
+            debug_code=code if _debug_otp_code_enabled(self.sender) else None,
+        )
 
     async def confirm(
         self,
@@ -629,6 +636,23 @@ def _allow_noop_sms() -> bool:
     return settings.otp_allow_noop_sms_sender and environment not in {"production", "prod"}
 
 
+def _debug_otp_code_enabled(sender: SmsSender) -> bool:
+    """Return whether the local API may expose a generated OTP code.
+
+    Args:
+        sender (SmsSender):
+            Sender configured for the current OTP service.
+
+    Returns:
+        bool:
+            True only for local/test/development runs using the no-op sender.
+    """
+    environment = settings.environment.strip().lower()
+    return (
+        environment in _LOCAL_ENVIRONMENTS
+        and isinstance(sender, NoopSmsSender)
+        and settings.otp_allow_noop_sms_sender
+    )
 def _generate_code() -> str:
     """Generate a six-digit one-time code.
 
