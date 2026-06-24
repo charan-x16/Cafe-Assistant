@@ -96,8 +96,8 @@ class ChatAgentRequest:
 class AgentConfig:
     """Runtime limits for one agent invocation.
 
-    `max_tool_calls` bounds deterministic tool usage, `deadline_seconds` bounds
-    router/tool/composer work, and `search_k` controls the safe candidate count.
+    max_tool_calls bounds deterministic tool usage, deadline_seconds bounds
+    router/tool/composer work, and search_k controls recommendation candidates.
     """
 
     max_tool_calls: int = settings.agent_max_tool_calls
@@ -414,6 +414,7 @@ class ChatAgent:
             **current_turn_preferences,
         }
         search_query = _query_with_preferences(request.message, active_preferences)
+        broad_menu_request = _is_broad_menu_request(request.message)
 
         self._ensure_deadline(deadline_at)
         classification = await self._run_with_deadline(
@@ -483,13 +484,20 @@ class ChatAgent:
                 customer_id=customer_id,
             )
 
-        self._charge_tool_call(controls)
-        output = await self._safe_search_menu(
-            request,
-            query=search_query,
-            restrictions=extraction.restrictions,
-            controls=controls,
-        )
+        if broad_menu_request:
+            output = await self._fallback_popular_items(
+                request,
+                extraction.restrictions,
+                controls,
+            )
+        else:
+            self._charge_tool_call(controls)
+            output = await self._safe_search_menu(
+                request,
+                query=search_query,
+                restrictions=extraction.restrictions,
+                controls=controls,
+            )
 
         self._ensure_deadline(deadline_at)
         state_history.append(AgentState.FILTERING)
@@ -520,6 +528,21 @@ class ChatAgent:
             )
 
         state_history.append(AgentState.RECOMMENDING)
+        if broad_menu_request:
+            response = _format_menu_browse_response(safe_items)
+            return _PreparedResponse(
+                response=response,
+                safe_items=safe_items,
+                restrictions=extraction.restrictions,
+                current_turn_restrictions=extraction.current_turn_restrictions,
+                current_turn_preferences=current_turn_preferences,
+                preferences=active_preferences,
+                state_history=[*state_history, AgentState.COMPOSING, AgentState.COMPLETE],
+                medical_disclaimer=False,
+                tool_calls=controls.tool_calls,
+                customer_id=customer_id,
+            )
+
         recommended_items = safe_items[:3]
         state_history.append(AgentState.COMPOSING)
         return _PreparedResponse(
@@ -623,15 +646,19 @@ class ChatAgent:
             raise
         except Exception:
             record_quality_event("recommender_fallback_total", stage="search_menu")
-            return await self._fallback_popular_items(request, restrictions, controls)
+            return await self._fallback_popular_items(
+                request, restrictions, controls, result_limit=self.config.search_k
+            )
 
     async def _fallback_popular_items(
         self,
         request: ChatAgentRequest,
         restrictions: CustomerRestrictions,
         controls: _RunControls,
+        *,
+        result_limit: int | None = None,
     ) -> MenuItemsOutput:
-        """Load popular fallback items while respecting budget and deadline.
+        """Load fallback or broad-browse items while respecting budget and deadline.
 
         Args:
             request (ChatAgentRequest):
@@ -640,10 +667,13 @@ class ChatAgent:
                 Customer restrictions that must still be enforced during fallback.
             controls (_RunControls):
                 Request controls carrying the deadline and tool-call counter.
+            result_limit (int | None):
+                Optional safe result cap. None returns every item that passed
+                the deterministic filter, which is used for broad menu browsing.
 
         Returns:
             MenuItemsOutput:
-                Safety-filtered fallback items capped to the configured search size.
+                Safety-filtered items, either complete for broad browsing or capped for fallback.
         """
         self._charge_tool_call(controls)
         all_items = await self._run_with_deadline(
@@ -653,7 +683,7 @@ class ChatAgent:
                     tenant_id=request.tenant_id,
                     query="",
                     restrictions=RestrictionsSchema.from_domain(restrictions),
-                    limit=50,
+                    limit=None,
                 ),
             ),
             controls,
@@ -676,7 +706,9 @@ class ChatAgent:
         )
         if not isinstance(result, MenuItemsOutput):
             raise RecommenderUnavailableError("Fallback dietary filter failed.")
-        return MenuItemsOutput(items=result.items[: self.config.search_k])
+        if result_limit is None:
+            return result
+        return MenuItemsOutput(items=result.items[:result_limit])
 
     async def _resolve_customer_id(self, request: ChatAgentRequest) -> int | None:
         """Resolve an optional durable customer identity within the request tenant.
@@ -958,6 +990,88 @@ def _chunk_text(text: str, chunk_size: int = 24) -> list[str]:
     """
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]
 
+
+def _format_menu_browse_response(items: list[MenuItemView]) -> str:
+    """Build a deterministic menu browse response from safe catalog items.
+
+    Args:
+        items (list[MenuItemView]):
+            Safety-filtered menu items selected for broad menu browsing.
+
+    Returns:
+        str:
+            Customer-facing list built only from item names that passed the
+            deterministic safety filter.
+    """
+    if not items:
+        return (
+            "I can't confirm a safe menu option from the available menu data. "
+            "Please check with cafe staff before ordering."
+        )
+    item_lines = [f"- {item.name}" for item in items]
+    return "\n".join(
+        [
+            "Here are menu items I can currently confirm from the catalog:",
+            "",
+            *item_lines,
+            "",
+            (
+                "Ask for a category like lattes, teas, pastries, or sandwiches "
+                "if you want a narrower list."
+            ),
+        ]
+    )
+
+
+def _is_broad_menu_request(message: str) -> bool:
+    """Return whether a message asks for a general menu browse.
+
+    Args:
+        message (str):
+            Raw customer text from the current turn.
+
+    Returns:
+        bool:
+            True when the message asks to browse, show, list, or recommend the
+            menu in general, allowing the agent to return safety-filtered
+            catalog items instead of an empty retrieval result.
+    """
+    tokens = {token.strip("?.!,;:").lower() for token in message.split()}
+    tokens.discard("")
+    menu_terms = {"menu", "menus", "options", "items"}
+    browse_terms = {
+        "browse",
+        "give",
+        "have",
+        "list",
+        "recommend",
+        "see",
+        "show",
+        "suggest",
+        "view",
+    }
+    filler_terms = {
+        "a",
+        "all",
+        "an",
+        "available",
+        "can",
+        "could",
+        "entire",
+        "full",
+        "me",
+        "please",
+        "some",
+        "the",
+        "then",
+        "today",
+        "us",
+        "you",
+    }
+    allowed_terms = menu_terms | browse_terms | filler_terms
+    return bool(tokens & menu_terms) and bool(tokens & browse_terms) and tokens.issubset(
+        allowed_terms
+    )
 
 def _query_with_preferences(message: str, preferences: dict[str, object]) -> str:
     """Augment a retrieval query with safe durable preference hints.

@@ -144,13 +144,15 @@ class MenuLookupInput(BaseModel):
 
     The lookup tool is intentionally safety-aware: callers must provide the
     customer restrictions for the active turn so exact lookup cannot return raw
-    menu candidates that bypass the deterministic dietary/allergen filter.
+    menu candidates that bypass the deterministic dietary/allergen filter. The
+    optional limit is set to None only by trusted internal browse paths that
+    need the complete safe catalog rather than a short exact-match result.
     """
 
     tenant_id: int
     query: str
     restrictions: RestrictionsSchema
-    limit: int = 5
+    limit: int | None = 5
 
 
 class SearchMenuInput(BaseModel):
@@ -274,7 +276,10 @@ class ToolRegistry:
             raw_matches,
             tool_input.restrictions.to_domain(),
         )
-        matches = filter_result.safe_items[: tool_input.limit]
+        if tool_input.limit is None:
+            matches = filter_result.safe_items
+        else:
+            matches = filter_result.safe_items[: tool_input.limit]
         excluded_count = sum(1 for decision in filter_result.decisions if not decision.included)
         with span(
             "tool.menu_lookup",

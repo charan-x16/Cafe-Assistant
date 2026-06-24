@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     strong_chat_provider: str = "local"
     chat_timeout_seconds: float = 8.0
     chat_retries: int = 1
-    agent_deadline_seconds: float = 12.0
+    agent_deadline_seconds: float = 60.0
     agent_max_tool_calls: int = 4
     identity_phone_hash_secret: str = "local-dev-phone-hash-secret"
     identity_otp_hash_secret: str = "local-dev-otp-hash-secret"

@@ -31,7 +31,7 @@ from cafe_assistant.domain.dietary import AllergenCode, CustomerRestrictions
 from cafe_assistant.gateway.model_gateway import ChatMessage, ChatModelCascade
 from cafe_assistant.memory.session import InMemorySessionMemory
 from tests.fixtures.legacy_embeddings import backfill_menu_embeddings
-from tests.fixtures.legacy_menu import TENANT_NAME, seed_database
+from tests.fixtures.legacy_menu import MENU_ITEMS, TENANT_NAME, seed_database
 
 
 class FakeEmbeddingProvider:
@@ -314,6 +314,36 @@ async def test_fuzzy_request_returns_grounded_menu_item(
     assert "Matcha Almond Latte" in result.response
     assert AgentState.COMPLETE in result.state_history
 
+
+async def test_broad_menu_request_lists_catalog_items(
+    chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
+) -> None:
+    """Verify that broad menu browsing returns a real safe catalog list.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
+    agent, tenant_id, strong_model = chat_fixture
+
+    result = await agent.run(
+        ChatAgentRequest(
+            session_id="broad-menu-session",
+            tenant_id=tenant_id,
+            message="show me the menu",
+        )
+    )
+
+    assert result.response.startswith("Here are menu items I can currently confirm")
+    assert len(result.safe_items) == len(MENU_ITEMS)
+    assert "- Espresso" in result.response
+    assert "- Earl Grey Tea" in result.response
+    assert "- Seasonal Berry Danish" in result.response
+    assert strong_model.calls == []
 
 async def test_empty_safe_set_uses_staff_check_fallback(
     chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
