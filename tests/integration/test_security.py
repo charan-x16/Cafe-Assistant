@@ -30,13 +30,12 @@ from cafe_assistant.db.models import (
 from cafe_assistant.db.repositories.consent_repo import DIETARY_HEALTH_SCOPE, grant_consent
 from cafe_assistant.db.repositories.profile_repo import (
     append_event,
-    get_or_create_customer_by_phone,
     update_dietary_facts,
 )
 from cafe_assistant.db.session import get_session
 from cafe_assistant.gateway.model_gateway import ChatMessage, ChatModelCascade
+from cafe_assistant.identity.account import create_customer_account
 from cafe_assistant.identity.device import issue_device_token
-from cafe_assistant.identity.otp import hash_phone
 from cafe_assistant.main import create_app
 from cafe_assistant.memory.session import InMemorySessionMemory, SessionState
 from cafe_assistant.observability.tracing import span, start_trace
@@ -227,12 +226,20 @@ async def test_rate_limit_dependency_blocks_excess_requests(
         base_url="http://testserver",
     ) as client:
         first = await client.post(
-            "/identity/otp/start",
-            json={"tenant_id": tenant_id, "phone": "+15555550111"},
+            "/identity/register",
+            json={
+                "tenant_id": tenant_id,
+                "username": "rate-limit-user",
+                "password": "password123",
+            },
         )
         second = await client.post(
-            "/identity/otp/start",
-            json={"tenant_id": tenant_id, "phone": "+15555550111"},
+            "/identity/register",
+            json={
+                "tenant_id": tenant_id,
+                "username": "rate-limit-user",
+                "password": "password123",
+            },
         )
 
     app.dependency_overrides.clear()
@@ -240,6 +247,55 @@ async def test_rate_limit_dependency_blocks_excess_requests(
     assert second.status_code == 429
     assert "Retry-After" in second.headers
 
+
+async def test_account_register_login_and_profile_access(
+    security_session: tuple[AsyncSession, int, int],
+) -> None:
+    """Verify username/password accounts can register, log in, and read profile.
+
+    Args:
+        security_session (tuple[AsyncSession, int, int]):
+            Seeded session and tenant IDs used to call the identity API.
+
+    Returns:
+        None:
+            Failed expectations raise pytest assertion errors.
+    """
+    session, tenant_id, _other_tenant_id = security_session
+    app = _app_with_session(session)
+    credentials = {
+        "tenant_id": tenant_id,
+        "username": "security-user@example.com",
+        "password": "password123",
+    }
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        registered = await client.post("/identity/register", json=credentials)
+        token = registered.json()["auth_token"]
+        profile = await client.get(
+            "/identity/profile",
+            params={"tenant_id": tenant_id},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        logout = await client.post(
+            "/identity/logout",
+            params={"tenant_id": tenant_id},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        logged_in = await client.post("/identity/login", json=credentials)
+
+    app.dependency_overrides.clear()
+    assert registered.status_code == 200
+    assert registered.json()["username"] == "security-user@example.com"
+    assert profile.status_code == 200
+    assert profile.json()["customer_id"] == registered.json()["customer_id"]
+    assert logout.status_code == 200
+    assert logout.json()["logged_out"] is True
+    assert logged_in.status_code == 200
+    assert logged_in.json()["customer_id"] == registered.json()["customer_id"]
 
 async def test_cross_tenant_profile_access_is_denied(
     security_session: tuple[AsyncSession, int, int],
@@ -358,14 +414,15 @@ async def test_qr_location_tenant_mismatch_is_rejected(
         base_url="http://testserver",
     ) as client:
         response = await client.post(
-            "/identity/otp/start",
+            "/identity/register",
             json={
                 "qr_payload": {
                     "cafe_id": other_tenant_id,
                     "location_id": location_id,
                     "table_id": "A12",
                 },
-                "phone": "+15555550122",
+                "username": "qr-mismatch-user",
+                "password": "password123",
             },
         )
 
@@ -374,10 +431,10 @@ async def test_qr_location_tenant_mismatch_is_rejected(
     assert "location" in response.json()["detail"].lower()
 
 
-async def test_invalid_consent_scope_is_rejected(
+async def test_health_consent_requires_login(
     security_session: tuple[AsyncSession, int, int],
 ) -> None:
-    """Verify OTP start rejects consent scopes outside the allowlist.
+    """Verify health-data consent cannot be granted anonymously.
 
     Args:
         security_session (tuple[AsyncSession, int, int]):
@@ -395,18 +452,13 @@ async def test_invalid_consent_scope_is_rejected(
         base_url="http://testserver",
     ) as client:
         response = await client.post(
-            "/identity/otp/start",
-            json={
-                "tenant_id": tenant_id,
-                "phone": "+15555550123",
-                "scopes": ["marketing"],
-            },
+            "/identity/consent/health",
+            json={"tenant_id": tenant_id, "session_id": "anonymous-health-session"},
         )
 
     app.dependency_overrides.clear()
-    assert response.status_code == 400
-    assert "Unsupported consent scope" in response.json()["detail"]
-
+    assert response.status_code == 401
+    assert "Login is required" in response.json()["detail"]
 async def test_prompt_injection_in_user_or_menu_content_is_neutralized(
     security_session: tuple[AsyncSession, int, int],
 ) -> None:
@@ -575,8 +627,12 @@ async def test_direct_unknown_tenant_is_rejected(
         base_url="http://testserver",
     ) as client:
         response = await client.post(
-            "/identity/otp/start",
-            json={"tenant_id": 999_999, "phone": "+15555550133"},
+            "/identity/register",
+            json={
+                "tenant_id": 999_999,
+                "username": "unknown-tenant-user",
+                "password": "password123",
+            },
         )
 
     app.dependency_overrides.clear()
@@ -663,7 +719,7 @@ async def test_rate_limit_storage_keys_are_hashed() -> None:
     assert all(len(key.rsplit(":", 1)[-1]) == 64 for key in keys)
 
 
-def test_extended_redaction_covers_auth_cookie_otp_and_provider_secrets() -> None:
+def test_extended_redaction_covers_auth_cookie_and_provider_secrets() -> None:
     """Verify redaction covers expanded security-sensitive values.
 
     Args:
@@ -675,15 +731,14 @@ def test_extended_redaction_covers_auth_cookie_otp_and_provider_secrets() -> Non
     """
     text = (
         "Authorization: Bearer sk-secret Cookie: session=raw-cookie "
-        "otp_code=123456 challenge_id=abc123 qdrant_api_key=qdrant-secret "
+        "auth_token=raw-auth-token qdrant_api_key=qdrant-secret "
         "client_ip=203.0.113.9 ip: 2001:db8::1 customer test@example.com diabetic"
     )
     payload = redact_payload(
         {
             "authorization": "Bearer sk-secret",
             "cookie": "session=raw-cookie",
-            "challenge_id": "abc123",
-            "code": "123456",
+            "auth_token": "raw-auth-token",
             "qdrant_api_key": "qdrant-secret",
             "client_ip": "203.0.113.9",
             "email": "test@example.com",
@@ -694,8 +749,7 @@ def test_extended_redaction_covers_auth_cookie_otp_and_provider_secrets() -> Non
     combined = f"{payload} {redacted_text}"
     assert "sk-secret" not in combined
     assert "raw-cookie" not in combined
-    assert "123456" not in combined
-    assert "abc123" not in combined
+    assert "raw-auth-token" not in combined
     assert "qdrant-secret" not in combined
     assert "203.0.113.9" not in combined
     assert "test@example.com" not in combined
@@ -747,7 +801,7 @@ async def test_profile_deletion_clears_cookie_and_session_memory(
         state=SessionState(preferences={"milk": "oat"}),
     )
     monkeypatch.setattr(
-        "cafe_assistant.api.routes_consent.get_redis_session_memory",
+        "cafe_assistant.api.routes_identity.get_redis_session_memory",
         lambda: memory,
     )
     app = _app_with_session(session)
@@ -816,31 +870,33 @@ async def _create_profile(session: AsyncSession, tenant_id: int) -> str:
         str:
             Value produced for the caller according to the function contract.
     """
-    customer = await get_or_create_customer_by_phone(
+    credentials = await create_customer_account(
         session,
         tenant_id=tenant_id,
-        phone_hash=hash_phone("+15555550100"),
+        username=f"security-profile-{tenant_id}",
+        password="password123",
     )
+    customer_id = credentials.customer_id
     await grant_consent(
         session,
         tenant_id=tenant_id,
-        customer_id=customer.id,
+        customer_id=customer_id,
         scope=DIETARY_HEALTH_SCOPE,
     )
     await update_dietary_facts(
         session,
         tenant_id=tenant_id,
-        customer_id=customer.id,
+        customer_id=customer_id,
         updates={"avoid_allergens": ["PEANUT"]},
     )
     await append_event(
         session,
         tenant_id=tenant_id,
-        customer_id=customer.id,
+        customer_id=customer_id,
         event_type="test_event",
         payload={"ok": True},
     )
-    return await issue_device_token(session, tenant_id=tenant_id, customer_id=customer.id)
+    return await issue_device_token(session, tenant_id=tenant_id, customer_id=customer_id)
 
 
 def _chunks(text: str, chunk_size: int = 12) -> list[str]:

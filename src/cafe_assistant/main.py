@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 
 from cafe_assistant.api.routes_chat import router as chat_router
-from cafe_assistant.api.routes_consent import router as consent_router
+from cafe_assistant.api.routes_identity import router as identity_router
 from cafe_assistant.api.routes_observability import router as observability_router
 from cafe_assistant.config import settings
 from cafe_assistant.gateway.model_gateway import get_embedding_provider
@@ -82,7 +82,7 @@ def create_app() -> FastAPI:
     configure_redacted_logging()
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.include_router(chat_router)
-    app.include_router(consent_router)
+    app.include_router(identity_router)
     app.include_router(observability_router)
 
     @app.get("/")

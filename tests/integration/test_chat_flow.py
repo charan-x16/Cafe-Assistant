@@ -315,10 +315,10 @@ async def test_fuzzy_request_returns_grounded_menu_item(
     assert AgentState.COMPLETE in result.state_history
 
 
-async def test_broad_menu_request_lists_catalog_items(
+async def test_broad_menu_request_lists_sections_first(
     chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
 ) -> None:
-    """Verify that broad menu browsing returns a real safe catalog list.
+    """Verify that broad menu browsing lists sections before item details.
 
     Args:
         chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
@@ -338,12 +338,187 @@ async def test_broad_menu_request_lists_catalog_items(
         )
     )
 
-    assert result.response.startswith("Here are menu items I can currently confirm")
+    assert result.response.startswith("Absolutely - here are the menu sections")
     assert len(result.safe_items) == len(MENU_ITEMS)
-    assert "- Espresso" in result.response
-    assert "- Earl Grey Tea" in result.response
-    assert "- Seasonal Berry Danish" in result.response
+    assert "- Coffee (6 items)" in result.response
+    assert "- Pastry (5 items)" in result.response
+    assert "- Sandwich (2 items)" in result.response
+    assert "- Tea (3 items)" in result.response
+    assert "- Espresso" not in result.response
     assert strong_model.calls == []
+
+
+async def test_broad_menu_request_after_stored_allergy_is_filtered(
+    chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
+) -> None:
+    """Verify stored allergen restrictions filter later menu browsing.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
+    agent, tenant_id, strong_model = chat_fixture
+
+    await agent.run(
+        ChatAgentRequest(
+            session_id="stored-dairy-menu-session",
+            tenant_id=tenant_id,
+            message="I am allergic to dairy products.",
+        )
+    )
+    result = await agent.run(
+        ChatAgentRequest(
+            session_id="stored-dairy-menu-session",
+            tenant_id=tenant_id,
+            message="Can you show me the menu?",
+        )
+    )
+
+    assert "I filtered this list for avoiding dairy" in result.response
+    assert "Items with unknown allergen data are not shown" in result.response
+    assert "- Coffee (4 items)" in result.response
+    assert "- Tea (2 items)" in result.response
+    assert "- Sandwich (1 item)" in result.response
+    assert "- Pastry" not in result.response
+    assert all(AllergenCode.DAIRY not in item.allergen_codes for item in result.safe_items)
+    assert all(item.allergen_data_complete for item in result.safe_items)
+    assert strong_model.calls == []
+
+async def test_section_request_lists_only_that_section(
+    chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
+) -> None:
+    """Verify that a section request returns real items from that section only.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
+    agent, tenant_id, strong_model = chat_fixture
+
+    result = await agent.run(
+        ChatAgentRequest(
+            session_id="coffee-section-session",
+            tenant_id=tenant_id,
+            message="yes i want the coffee section",
+        )
+    )
+
+    item_names = {item.name for item in result.safe_items}
+    assert result.response.startswith("Of course - here's the Coffee section")
+    assert item_names == {
+        "Espresso",
+        "Americano",
+        "Cappuccino",
+        "Vanilla Oat Latte",
+        "Mocha",
+        "Cold Brew",
+    }
+    assert "- Espresso" in result.response
+    assert "- Cold Brew" in result.response
+    assert "Earl Grey Tea" not in result.response
+    assert strong_model.calls == []
+
+
+async def test_natural_section_question_uses_menu_browser(
+    chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
+) -> None:
+    """Verify natural section questions stay on deterministic menu browsing.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
+    agent, tenant_id, strong_model = chat_fixture
+
+    result = await agent.run(
+        ChatAgentRequest(
+            session_id="natural-sandwich-section-session",
+            tenant_id=tenant_id,
+            message="What sandwiches do you have?",
+        )
+    )
+
+    item_names = {item.name for item in result.safe_items}
+    assert result.response.startswith("Of course - here's the Sandwich section")
+    assert item_names == {"Avocado Toast", "Turkey Pesto Panini"}
+    assert "- Avocado Toast" in result.response
+    assert "- Turkey Pesto Panini" in result.response
+    assert "- Espresso" not in result.response
+    assert strong_model.calls == []
+
+
+async def test_restriction_aware_section_question_uses_safety_filter(
+    chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
+) -> None:
+    """Verify section browsing honors current-turn allergen restrictions.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
+    agent, tenant_id, strong_model = chat_fixture
+
+    result = await agent.run(
+        ChatAgentRequest(
+            session_id="dairy-coffee-section-session",
+            tenant_id=tenant_id,
+            message="I am allergic to dairy. Show me coffees.",
+        )
+    )
+
+    item_names = {item.name for item in result.safe_items}
+    assert result.response.startswith("Of course - here's the Coffee section")
+    assert item_names == {"Espresso", "Americano", "Vanilla Oat Latte", "Cold Brew"}
+    assert all(AllergenCode.DAIRY not in item.allergen_codes for item in result.safe_items)
+    assert "- Cappuccino" not in result.response
+    assert "- Mocha" not in result.response
+    assert strong_model.calls == []
+
+
+async def test_vague_light_request_falls_back_to_safe_catalog_suggestions(
+    chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],
+) -> None:
+    """Verify vague recommendation queries still return grounded safe items.
+
+    Args:
+        chat_fixture (tuple[ChatAgent, int, CapturingChatProvider]):
+            Seeded chat agent, tenant ID, and capturing model provider used by the test.
+
+    Returns:
+        None:
+            No value is returned; failed expectations raise pytest assertion errors.
+    """
+    agent, tenant_id, strong_model = chat_fixture
+
+    result = await agent.run(
+        ChatAgentRequest(
+            session_id="light-request-session",
+            tenant_id=tenant_id,
+            message="What should I order if I want something light?",
+        )
+    )
+
+    assert result.safe_items
+    assert "can't confirm a safe menu option" not in result.response
+    assert result.response.startswith("I can suggest ")
+    assert _latest_safe_item_names(strong_model) <= {item.name for item in result.safe_items}
+
 
 async def test_empty_safe_set_uses_staff_check_fallback(
     chat_fixture: tuple[ChatAgent, int, CapturingChatProvider],

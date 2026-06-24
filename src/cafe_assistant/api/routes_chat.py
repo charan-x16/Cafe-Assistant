@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -22,6 +25,7 @@ from cafe_assistant.observability.metrics import RequestTimer
 from cafe_assistant.observability.tracing import finish_trace, start_trace
 
 router = APIRouter()
+logger = logging.getLogger("uvicorn.error")
 _STATIC_DIR = Path(__file__).parents[3] / "static"
 
 
@@ -84,6 +88,7 @@ async def chat(
         trace_id=context.trace_id,
     )
     timer = RequestTimer("/chat")
+    started_at = time.perf_counter()
     agent = ChatAgent(session)
 
     async def event_stream() -> AsyncIterator[str]:
@@ -116,6 +121,18 @@ async def chat(
             ok = True
             yield "event: done\ndata: {}\n\n"
         finally:
+            elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            completed_at = datetime.now(UTC).isoformat()
+            logger.info(
+                "chat_response_completed completed_at=%s duration_ms=%s ok=%s "
+                "tenant_id=%s request_id=%s trace_id=%s",
+                completed_at,
+                elapsed_ms,
+                ok,
+                context.tenant_id,
+                context.request_id,
+                context.trace_id,
+            )
             timer.finish(ok=ok)
             finish_trace(context.trace_id)
 

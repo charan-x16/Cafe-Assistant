@@ -162,7 +162,7 @@ def validate_consent_scopes(scopes: tuple[str, ...] | list[str]) -> tuple[str, .
 
     Args:
         scopes (tuple[str, ...] | list[str]):
-            Candidate scopes requested for an OTP upgrade.
+            Candidate scopes requested for an explicit account consent grant.
 
     Returns:
         tuple[str, ...]:

@@ -157,6 +157,91 @@
         background: linear-gradient(180deg, rgba(255, 254, 250, 0.94), rgba(245, 246, 241, 0.96));
       }
 
+      body.auth-locked .conversation,
+      body.auth-locked .composer-area {
+        display: none;
+      }
+
+      body.auth-locked .main-panel {
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+
+      .auth-screen {
+        min-height: 0;
+        display: grid;
+        align-content: center;
+        justify-items: center;
+        padding: clamp(28px, 7vw, 72px) 22px;
+      }
+
+      .auth-screen[hidden] {
+        display: none;
+      }
+
+      .auth-panel {
+        width: min(520px, 100%);
+        display: grid;
+        gap: 20px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background:
+          linear-gradient(180deg, rgba(255, 254, 250, 0.98), rgba(240, 243, 236, 0.9));
+        padding: clamp(22px, 4vw, 34px);
+        box-shadow: 0 18px 50px rgba(22, 24, 21, 0.1);
+      }
+
+      .auth-heading {
+        display: grid;
+        gap: 10px;
+      }
+
+      .auth-heading .stamp {
+        width: 62px;
+        height: 62px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line-strong);
+        border-radius: 50%;
+        color: var(--forest-dark);
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 1.35rem;
+        background: rgba(255, 254, 250, 0.76);
+      }
+
+      .auth-heading h3 {
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", serif;
+        font-size: clamp(1.55rem, 4vw, 2.25rem);
+        line-height: 1.05;
+        letter-spacing: 0;
+      }
+
+      .auth-heading p,
+      .auth-note {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .auth-form {
+        display: grid;
+        gap: 12px;
+      }
+
+      .auth-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+
+      .auth-message {
+        min-height: 1.4em;
+        margin: 0;
+        color: var(--berry);
+        line-height: 1.4;
+        font-weight: 700;
+      }
+
       .top-bar {
         min-height: 88px;
         display: flex;
@@ -406,19 +491,10 @@
         font-weight: 700;
       }
 
-      .memory-fields,
-      .otp-fields {
+      .memory-fields {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
         gap: 10px;
-      }
-
-      .otp-fields {
-        display: none;
-      }
-
-      .otp-fields.visible {
-        display: grid;
       }
 
       .composer-form {
@@ -536,7 +612,8 @@
 
         .composer-form,
         .memory-fields,
-        .otp-fields {
+        .account-fields,
+        .account-actions {
           grid-template-columns: 1fr;
         }
 
@@ -547,7 +624,7 @@
       }
     </style>
   </head>
-  <body>
+  <body class="auth-locked">
     <main class="app-shell">
       <aside class="side-panel" aria-label="Cafe assistant status">
         <section class="brand">
@@ -576,10 +653,32 @@
             <div class="status-pill"><span class="status-dot" aria-hidden="true"></span>Safety filter on</div>
             <div id="memory-actions" class="memory-actions">
               <button id="view-profile-button" class="icon-button" type="button" title="View remembered profile" aria-label="View remembered profile">P</button>
+              <button id="remember-health-button" class="icon-button" type="button" title="Remember health facts with consent" aria-label="Remember health facts with consent">H</button>
+              <button id="logout-button" class="icon-button" type="button" title="Log out" aria-label="Log out">O</button>
               <button id="forget-profile-button" class="icon-button" type="button" title="Forget remembered profile" aria-label="Forget remembered profile">X</button>
             </div>
           </div>
         </header>
+
+        <section id="auth-screen" class="auth-screen" aria-live="polite">
+          <div class="auth-panel">
+            <div class="auth-heading">
+              <div class="stamp" aria-hidden="true">BTB</div>
+              <h3>Log in to start your order conversation.</h3>
+              <p>Your cafe profile keeps preferences tenant-scoped. Health and allergy facts are remembered only after you grant consent.</p>
+            </div>
+            <form id="auth-form" class="auth-form">
+              <input id="auth-username-input" name="username" autocomplete="username" placeholder="Username or email" required />
+              <input id="auth-password-input" name="password" type="password" autocomplete="current-password" placeholder="Password" required />
+              <div class="auth-actions">
+                <button id="auth-login-button" class="primary-button" type="submit">Log in</button>
+                <button id="auth-register-button" class="secondary-button" type="button">Create account</button>
+              </div>
+            </form>
+            <p id="auth-message" class="auth-message"></p>
+            <p class="auth-note">Use the tenant shown above for this cafe. Change it only when you are testing another cafe catalog.</p>
+          </div>
+        </section>
 
         <section class="conversation">
           <div class="quick-prompts" aria-label="Quick prompts">
@@ -599,14 +698,14 @@
 
         <section class="composer-area">
           <section id="memory-panel" class="memory-panel" aria-live="polite">
-            <p id="memory-copy">Remember preferences for the next visit?</p>
-            <div class="memory-fields">
-              <input id="phone-input" name="phone" autocomplete="tel" placeholder="Phone number" />
-              <button id="start-otp-button" class="primary-button" type="button">Remember</button>
+            <p id="memory-copy">Log in to remember preferences for the next visit.</p>
+            <div class="memory-fields account-fields">
+              <input id="username-input" name="username" autocomplete="username" placeholder="Username or email" />
+              <input id="password-input" name="password" type="password" autocomplete="current-password" placeholder="Password" />
             </div>
-            <div id="otp-fields" class="otp-fields">
-              <input id="otp-input" name="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="Code" />
-              <button id="confirm-otp-button" class="primary-button" type="button">Confirm</button>
+            <div class="memory-fields account-actions">
+              <button id="login-button" class="primary-button" type="button">Log in</button>
+              <button id="register-button" class="secondary-button" type="button">Create account</button>
             </div>
             <button id="dismiss-memory-button" class="secondary-button" type="button">Not now</button>
           </section>
@@ -626,26 +725,33 @@
       const input = document.querySelector("#message-input");
       const button = document.querySelector("#send-button");
       const tenantInput = document.querySelector("#tenant-input");
+      const authScreen = document.querySelector("#auth-screen");
+      const authForm = document.querySelector("#auth-form");
+      const authUsernameInput = document.querySelector("#auth-username-input");
+      const authPasswordInput = document.querySelector("#auth-password-input");
+      const authLoginButton = document.querySelector("#auth-login-button");
+      const authRegisterButton = document.querySelector("#auth-register-button");
+      const authMessage = document.querySelector("#auth-message");
       const memoryPanel = document.querySelector("#memory-panel");
       const memoryCopy = document.querySelector("#memory-copy");
       const memoryActions = document.querySelector("#memory-actions");
       const memoryState = document.querySelector("#memory-state");
-      const phoneInput = document.querySelector("#phone-input");
-      const otpInput = document.querySelector("#otp-input");
-      const otpFields = document.querySelector("#otp-fields");
-      const startOtpButton = document.querySelector("#start-otp-button");
-      const confirmOtpButton = document.querySelector("#confirm-otp-button");
+      const usernameInput = document.querySelector("#username-input");
+      const passwordInput = document.querySelector("#password-input");
+      const loginButton = document.querySelector("#login-button");
+      const registerButton = document.querySelector("#register-button");
       const dismissMemoryButton = document.querySelector("#dismiss-memory-button");
       const viewProfileButton = document.querySelector("#view-profile-button");
+      const rememberHealthButton = document.querySelector("#remember-health-button");
+      const logoutButton = document.querySelector("#logout-button");
       const forgetProfileButton = document.querySelector("#forget-profile-button");
       const quickPromptButtons = document.querySelectorAll("[data-prompt]");
       const sessionId = crypto.randomUUID();
-      let deviceToken = localStorage.getItem("cafeAssistantDeviceToken") || "";
-      let challengeId = "";
+      let authToken = localStorage.getItem("cafeAssistantAuthToken") || "";
       let completedAssistantTurns = 0;
 
       tenantInput.value = localStorage.getItem("cafeAssistantTenantId") || "3";
-      updateMemoryActions();
+      updateAuthState();
 
       function currentTenantId() {
         const parsed = Number.parseInt(tenantInput.value.trim(), 10);
@@ -659,6 +765,11 @@
 
       quickPromptButtons.forEach((promptButton) => {
         promptButton.addEventListener("click", () => {
+          if (!authToken) {
+            showAuthMessage("Please log in before starting the chat.");
+            authUsernameInput.focus();
+            return;
+          }
           input.value = promptButton.dataset.prompt || "";
           input.focus();
         });
@@ -678,9 +789,23 @@
         appendMessage("system", text);
       }
 
+      authForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        await authenticateAccount("/identity/login", authLoginButton);
+      });
+
+      authRegisterButton.addEventListener("click", async () => {
+        await authenticateAccount("/identity/register", authRegisterButton);
+      });
+
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const text = input.value.trim();
+        if (!authToken) {
+          showAuthMessage("Please log in before starting the chat.");
+          authUsernameInput.focus();
+          return;
+        }
         if (!text) return;
 
         appendMessage("user", text);
@@ -689,11 +814,12 @@
         const assistantNode = appendMessage("assistant streaming", "");
 
         try {
-          const headers = { "Content-Type": "application/json" };
-          if (deviceToken) headers.Authorization = `Bearer ${deviceToken}`;
           const response = await fetch("/chat", {
             method: "POST",
-            headers,
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${authToken}`,
+            },
             body: JSON.stringify({
               session_id: sessionId,
               tenant_id: currentTenantId(),
@@ -702,6 +828,10 @@
           });
 
           if (!response.ok || !response.body) {
+            if (response.status === 401) {
+              clearAuthToken();
+              updateAuthState();
+            }
             throw new Error(await readableError(response));
           }
 
@@ -731,104 +861,150 @@
           assistantNode.classList.remove("streaming");
           completedAssistantTurns += 1;
           maybeShowMemoryPrompt();
-          button.disabled = false;
-          input.focus();
+          button.disabled = !authToken;
+          if (authToken) input.focus();
         }
       });
 
-      startOtpButton.addEventListener("click", async () => {
-        const phone = phoneInput.value.trim();
-        if (!phone) return;
-        startOtpButton.disabled = true;
-        try {
-          const response = await fetch("/identity/otp/start", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenant_id: currentTenantId(), phone }),
-          });
-          const payload = await response.json();
-          if (!response.ok) throw new Error(payload.detail || "Could not start OTP.");
-          challengeId = payload.challenge_id;
-          otpFields.classList.add("visible");
-          memoryCopy.textContent = payload.debug_code
-            ? `Development OTP code: ${payload.debug_code}`
-            : "Enter the code to remember preferences.";
-        } catch (error) {
-          memoryCopy.textContent = error.message || "Could not start the remember flow.";
-        } finally {
-          startOtpButton.disabled = false;
-        }
+      loginButton.addEventListener("click", async () => {
+        await authenticateAccount("/identity/login", loginButton);
       });
 
-      confirmOtpButton.addEventListener("click", async () => {
-        const phone = phoneInput.value.trim();
-        const code = otpInput.value.trim();
-        if (!phone || !code || !challengeId) return;
-        confirmOtpButton.disabled = true;
+      registerButton.addEventListener("click", async () => {
+        await authenticateAccount("/identity/register", registerButton);
+      });
+
+      async function authenticateAccount(endpoint, actionButton) {
+        const username = (authUsernameInput.value || usernameInput.value).trim();
+        const password = authPasswordInput.value || passwordInput.value;
+        if (!username || !password) {
+          showAuthMessage("Enter a username and password to continue.");
+          return;
+        }
+        actionButton.disabled = true;
+        authMessage.textContent = "";
         try {
-          const response = await fetch("/identity/otp/confirm", {
+          const response = await fetch(endpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               session_id: sessionId,
               tenant_id: currentTenantId(),
-              phone,
-              challenge_id: challengeId,
-              code,
+              username,
+              password,
             }),
           });
           const payload = await response.json();
-          if (!response.ok) throw new Error(payload.detail || "Could not confirm OTP.");
-          deviceToken = payload.device_token;
-          localStorage.setItem("cafeAssistantDeviceToken", deviceToken);
+          if (!response.ok) throw new Error(payload.detail || "Could not authenticate.");
+          authToken = payload.auth_token;
+          localStorage.setItem("cafeAssistantAuthToken", authToken);
+          authPasswordInput.value = "";
+          passwordInput.value = "";
           memoryPanel.classList.remove("visible");
-          updateMemoryActions();
-          appendSystemMessage("Preferences can now be remembered for this tenant.");
+          updateAuthState();
+          appendSystemMessage("You are logged in. Preferences can now be remembered for this cafe account.");
         } catch (error) {
-          memoryCopy.textContent = error.message || "Could not confirm the code.";
+          showAuthMessage(error.message || "Could not complete account login.");
         } finally {
-          confirmOtpButton.disabled = false;
+          actionButton.disabled = false;
         }
-      });
+      }
 
       dismissMemoryButton.addEventListener("click", () => {
         memoryPanel.classList.remove("visible");
       });
 
       viewProfileButton.addEventListener("click", async () => {
-        if (!deviceToken) return;
+        if (!authToken) return;
         const response = await fetch(`/identity/profile?tenant_id=${currentTenantId()}`, {
-          headers: { Authorization: `Bearer ${deviceToken}` },
+          headers: { Authorization: `Bearer ${authToken}` },
         });
         if (!response.ok) {
           appendSystemMessage("Could not load remembered profile.");
           return;
         }
         const profile = await response.json();
-        appendMessage("assistant", `Remembered profile: ${JSON.stringify(profile.preferences)}`);
+        appendMessage(
+          "assistant",
+          `Remembered profile: ${JSON.stringify({
+            preferences: profile.preferences,
+            dietary_facts: profile.dietary_facts,
+          })}`,
+        );
+      });
+
+      rememberHealthButton.addEventListener("click", async () => {
+        if (!authToken) return;
+        const response = await fetch("/identity/consent/health", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            session_id: sessionId,
+            tenant_id: currentTenantId(),
+          }),
+        });
+        if (!response.ok) {
+          appendSystemMessage("Could not remember health facts right now.");
+          return;
+        }
+        appendSystemMessage("Health and dietary facts can now be remembered for this account.");
+      });
+
+      logoutButton.addEventListener("click", async () => {
+        if (!authToken) return;
+        await fetch(`/identity/logout?tenant_id=${currentTenantId()}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        clearAuthToken();
+        updateAuthState();
+        appendSystemMessage("Logged out. Log in again to continue chatting.");
       });
 
       forgetProfileButton.addEventListener("click", async () => {
-        if (!deviceToken) return;
-        await fetch(`/identity/profile?tenant_id=${currentTenantId()}`, {
+        if (!authToken) return;
+        await fetch(`/identity/profile?tenant_id=${currentTenantId()}&session_id=${encodeURIComponent(sessionId)}`, {
           method: "DELETE",
-          headers: { Authorization: `Bearer ${deviceToken}` },
+          headers: { Authorization: `Bearer ${authToken}` },
         });
-        localStorage.removeItem("cafeAssistantDeviceToken");
-        deviceToken = "";
-        updateMemoryActions();
+        clearAuthToken();
+        updateAuthState();
         appendSystemMessage("Remembered profile removed from this browser.");
       });
 
       function maybeShowMemoryPrompt() {
-        if (deviceToken || completedAssistantTurns < 1) return;
-        memoryPanel.classList.add("visible");
+        if (authToken || completedAssistantTurns < 1) return;
+        updateAuthState();
       }
 
-      function updateMemoryActions() {
-        const remembered = Boolean(deviceToken);
-        memoryActions.classList.toggle("visible", remembered);
-        memoryState.textContent = remembered ? "Durable" : "Session";
+      function clearAuthToken() {
+        localStorage.removeItem("cafeAssistantAuthToken");
+        authToken = "";
+      }
+
+      function showAuthMessage(text) {
+        authMessage.textContent = text;
+        memoryCopy.textContent = text;
+      }
+
+      function updateAuthState() {
+        const authenticated = Boolean(authToken);
+        document.body.classList.toggle("auth-locked", !authenticated);
+        authScreen.hidden = authenticated;
+        input.disabled = !authenticated;
+        button.disabled = !authenticated;
+        quickPromptButtons.forEach((promptButton) => {
+          promptButton.disabled = !authenticated;
+        });
+        memoryActions.classList.toggle("visible", authenticated);
+        memoryState.textContent = authenticated ? "Account" : "Login";
+        if (!authenticated) {
+          memoryPanel.classList.remove("visible");
+          setTimeout(() => authUsernameInput.focus(), 0);
+        }
       }
 
       async function readableError(response) {

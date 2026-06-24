@@ -950,10 +950,14 @@ class Customer(Base):
     """SQLAlchemy model for customer records."""
     __tablename__ = "customers"
     __table_args__ = (
-        UniqueConstraint(
+
+        Index(
+            "uq_customers_tenant_username",
             "tenant_id",
-            "phone_hash",
-            name="uq_customers_tenant_phone_hash",
+            "username",
+            unique=True,
+            postgresql_where=text("username IS NOT NULL"),
+            sqlite_where=text("username IS NOT NULL"),
         ),
     )
 
@@ -963,7 +967,8 @@ class Customer(Base):
         nullable=False,
         index=True,
     )
-    phone_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    username: Mapped[str | None] = mapped_column(String(150), nullable=True, index=True)
+    password_hash: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

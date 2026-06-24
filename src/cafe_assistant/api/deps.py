@@ -25,7 +25,8 @@ from cafe_assistant.security.rate_limit import (
 )
 
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
-DEVICE_TOKEN_COOKIE_NAME = "cafe_assistant_device_token"
+AUTH_TOKEN_COOKIE_NAME = "cafe_assistant_auth_token"
+DEVICE_TOKEN_COOKIE_NAME = AUTH_TOKEN_COOKIE_NAME
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,17 +219,19 @@ async def device_token_from_request(request: Request) -> str | None:
     payload = await _payload(request)
     if (
         request.query_params.get("device_token") is not None
+        or request.query_params.get("auth_token") is not None
         or payload.get("device_token") is not None
+        or payload.get("auth_token") is not None
     ):
         raise HTTPException(
             status_code=400,
-            detail="device_token must be sent in the Authorization header or secure cookie.",
+            detail="auth token must be sent in the Authorization header or secure cookie.",
         )
 
     bearer_token = _bearer_token(request.headers.get("authorization"))
     cookie_token = request.cookies.get(DEVICE_TOKEN_COOKIE_NAME)
     if bearer_token and cookie_token and bearer_token != cookie_token:
-        raise HTTPException(status_code=400, detail="Conflicting device tokens supplied.")
+        raise HTTPException(status_code=400, detail="Conflicting auth tokens supplied.")
     return bearer_token or cookie_token
 
 

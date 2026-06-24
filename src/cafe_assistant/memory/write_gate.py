@@ -24,7 +24,7 @@ from cafe_assistant.db.repositories.profile_repo import (
     update_preferences,
 )
 from cafe_assistant.domain.dietary import CustomerRestrictions
-from cafe_assistant.identity.otp import restrictions_to_dietary_facts
+from cafe_assistant.identity.dietary_facts import restrictions_to_dietary_facts
 
 _MILK_PREFERENCE_PATTERN = re.compile(
     r"\b(?:i\s+)?(?:like|love|prefer)\s+(oat|almond|soy|whole)\s+milk\b",

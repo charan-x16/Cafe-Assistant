@@ -9,6 +9,7 @@ menu candidates or decides allergen/dietary safety.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -29,8 +30,12 @@ from cafe_assistant.agent.tools import (
     ToolRegistry,
 )
 from cafe_assistant.config import settings
+from cafe_assistant.db.repositories.menu_repo import (
+    MenuBrowseItem,
+    load_menu_browse_items_for_tenant,
+)
 from cafe_assistant.db.repositories.profile_repo import get_customer
-from cafe_assistant.domain.dietary import CustomerRestrictions, MenuItemView
+from cafe_assistant.domain.dietary import CustomerRestrictions, MenuItemView, filter_safe_items
 from cafe_assistant.gateway.model_gateway import (
     ChatMessage,
     ChatModelCascade,
@@ -416,13 +421,7 @@ class ChatAgent:
         search_query = _query_with_preferences(request.message, active_preferences)
         broad_menu_request = _is_broad_menu_request(request.message)
 
-        self._ensure_deadline(deadline_at)
-        classification = await self._run_with_deadline(
-            self.router.classify(request.message),
-            controls,
-        )
-        state_history.append(AgentState.CLASSIFIED)
-
+        # Simple deterministic menu browsing and medical refusals run before routing.
         if extraction.medical_question:
             response = (
                 "I can't help with insulin, carb-counting, or other medical decisions. "
@@ -436,14 +435,101 @@ class ChatAgent:
                 current_turn_restrictions=extraction.current_turn_restrictions,
                 current_turn_preferences=current_turn_preferences,
                 preferences=active_preferences,
-                state_history=[*state_history, AgentState.ESCALATED],
+                state_history=[*state_history, AgentState.CLASSIFIED, AgentState.ESCALATED],
                 medical_disclaimer=True,
                 tool_calls=controls.tool_calls,
                 customer_id=customer_id,
             )
 
+        possible_section_request = _might_be_menu_section_request(request.message)
+        if broad_menu_request or possible_section_request:
+            browse_entries = await self._safe_menu_browse_items(
+                request,
+                extraction.restrictions,
+                controls,
+            )
+            matched_section = _match_menu_section(browse_entries, request.message)
+            if broad_menu_request or matched_section is not None:
+                if not browse_entries:
+                    response = (
+                        "I can't confirm a safe menu option from the available menu data. "
+                        "Please check with cafe staff before ordering."
+                    )
+                    record_quality_event("empty_safe_sets_total", reason="menu_browse_empty")
+                    return _PreparedResponse(
+                        response=response,
+                        safe_items=[],
+                        restrictions=extraction.restrictions,
+                        current_turn_restrictions=extraction.current_turn_restrictions,
+                        current_turn_preferences=current_turn_preferences,
+                        preferences=active_preferences,
+                        state_history=[
+                            *state_history,
+                            AgentState.RETRIEVING,
+                            AgentState.FILTERING,
+                            AgentState.COMPLETE,
+                        ],
+                        medical_disclaimer=False,
+                        tool_calls=controls.tool_calls,
+                        customer_id=customer_id,
+                    )
+                if matched_section is None:
+                    response = _format_menu_sections_response(
+                        browse_entries,
+                        extraction.restrictions,
+                    )
+                    safe_items = [entry.item for entry in browse_entries]
+                else:
+                    response = _format_menu_section_items_response(
+                        matched_section,
+                        extraction.restrictions,
+                    )
+                    safe_items = [entry.item for entry in matched_section.entries]
+                return _PreparedResponse(
+                    response=response,
+                    safe_items=safe_items,
+                    restrictions=extraction.restrictions,
+                    current_turn_restrictions=extraction.current_turn_restrictions,
+                    current_turn_preferences=current_turn_preferences,
+                    preferences=active_preferences,
+                    state_history=[
+                        *state_history,
+                        AgentState.RETRIEVING,
+                        AgentState.FILTERING,
+                        AgentState.RECOMMENDING,
+                        AgentState.COMPOSING,
+                        AgentState.COMPLETE,
+                    ],
+                    medical_disclaimer=False,
+                    tool_calls=controls.tool_calls,
+                    customer_id=customer_id,
+                )
+        self._ensure_deadline(deadline_at)
+        classification = await self._run_with_deadline(
+            self.router.classify(request.message),
+            controls,
+        )
+        state_history.append(AgentState.CLASSIFIED)
+
         if classification.intent in {Intent.OUT_OF_SCOPE, Intent.SMALLTALK}:
             response = _non_menu_response(classification.intent)
+            return _PreparedResponse(
+                response=response,
+                safe_items=[],
+                restrictions=extraction.restrictions,
+                current_turn_restrictions=extraction.current_turn_restrictions,
+                current_turn_preferences=current_turn_preferences,
+                preferences=active_preferences,
+                state_history=[*state_history, AgentState.COMPLETE],
+                medical_disclaimer=False,
+                tool_calls=controls.tool_calls,
+                customer_id=customer_id,
+            )
+
+        if classification.intent == Intent.DIETARY_SAFETY:
+            response = _format_restriction_acknowledgement(
+                extraction.current_turn_restrictions,
+            )
             return _PreparedResponse(
                 response=response,
                 safe_items=[],
@@ -484,20 +570,13 @@ class ChatAgent:
                 customer_id=customer_id,
             )
 
-        if broad_menu_request:
-            output = await self._fallback_popular_items(
-                request,
-                extraction.restrictions,
-                controls,
-            )
-        else:
-            self._charge_tool_call(controls)
-            output = await self._safe_search_menu(
-                request,
-                query=search_query,
-                restrictions=extraction.restrictions,
-                controls=controls,
-            )
+        self._charge_tool_call(controls)
+        output = await self._safe_search_menu(
+            request,
+            query=search_query,
+            restrictions=extraction.restrictions,
+            controls=controls,
+        )
 
         self._ensure_deadline(deadline_at)
         state_history.append(AgentState.FILTERING)
@@ -508,6 +587,22 @@ class ChatAgent:
             safe_item_ids=[item.id for item in safe_items],
         ):
             pass
+        if not safe_items:
+            try:
+                fallback_output = await self._fallback_popular_items(
+                    request,
+                    extraction.restrictions,
+                    controls,
+                    result_limit=self.config.search_k,
+                )
+                safe_items = [item.to_domain() for item in fallback_output.items]
+                if safe_items:
+                    record_quality_event("recommender_fallback_total", stage="empty_search")
+            except (RequestDeadlineExceededError, ToolBudgetExceededError):
+                raise
+            except Exception:
+                record_quality_event("recommender_fallback_total", stage="empty_search_failed")
+
         if not safe_items:
             response = (
                 "I can't confirm a safe menu option from the available menu data. "
@@ -528,21 +623,6 @@ class ChatAgent:
             )
 
         state_history.append(AgentState.RECOMMENDING)
-        if broad_menu_request:
-            response = _format_menu_browse_response(safe_items)
-            return _PreparedResponse(
-                response=response,
-                safe_items=safe_items,
-                restrictions=extraction.restrictions,
-                current_turn_restrictions=extraction.current_turn_restrictions,
-                current_turn_preferences=current_turn_preferences,
-                preferences=active_preferences,
-                state_history=[*state_history, AgentState.COMPOSING, AgentState.COMPLETE],
-                medical_disclaimer=False,
-                tool_calls=controls.tool_calls,
-                customer_id=customer_id,
-            )
-
         recommended_items = safe_items[:3]
         state_history.append(AgentState.COMPOSING)
         return _PreparedResponse(
@@ -558,6 +638,49 @@ class ChatAgent:
             customer_id=customer_id,
         )
 
+    async def _safe_menu_browse_items(
+        self,
+        request: ChatAgentRequest,
+        restrictions: CustomerRestrictions,
+        controls: _RunControls,
+    ) -> list[MenuBrowseItem]:
+        """Load all browseable menu entries and apply the deterministic safety filter.
+
+        Args:
+            request (ChatAgentRequest):
+                Chat request containing the tenant scope for menu browsing.
+            restrictions (CustomerRestrictions):
+                Active restrictions that must be applied before item names are shown.
+            controls (_RunControls):
+                Request controls carrying the deadline and tool-call counter.
+
+        Returns:
+            list[MenuBrowseItem]:
+                Ordered browse entries whose `item` values passed the safety filter.
+        """
+        self._charge_tool_call(controls)
+        try:
+            entries = await self._run_with_deadline(
+                load_menu_browse_items_for_tenant(self.session, request.tenant_id),
+                controls,
+            )
+        except (RequestDeadlineExceededError, ToolBudgetExceededError):
+            raise
+        except Exception:
+            record_quality_event("recommender_fallback_total", stage="menu_browse")
+            return []
+        filter_result = filter_safe_items(
+            [entry.item for entry in entries],
+            restrictions,
+        )
+        safe_ids = {item.id for item in filter_result.safe_items}
+        with span(
+            "agent.menu_browse_filter",
+            retrieved_item_ids=[entry.item.id for entry in entries],
+            safe_item_ids=[item.id for item in filter_result.safe_items],
+        ):
+            pass
+        return [entry for entry in entries if entry.item.id in safe_ids]
     async def _safe_menu_lookup(
         self,
         request: ChatAgentRequest,
@@ -975,6 +1098,49 @@ def _non_menu_response(intent: Intent) -> str:
     return "I can only help with cafe menu questions and dietary safety for this menu."
 
 
+def _format_restriction_acknowledgement(restrictions: CustomerRestrictions) -> str:
+    """Build a deterministic acknowledgement for restriction-only turns.
+
+    This response lets the session memory persist newly stated allergies or
+    dietary modes without sending unrelated menu candidates to the model. It is
+    used only after the router classifies the turn as dietary-safety context,
+    not as a menu recommendation or section-browsing request.
+
+    Args:
+        restrictions (CustomerRestrictions):
+            Current-turn restrictions extracted from the customer's latest
+            message. Stored profile/session facts are not repeated here unless
+            the customer mentioned them again in this turn.
+
+    Returns:
+        str:
+            Customer-facing acknowledgement that confirms deterministic menu
+            filtering will use the stated restrictions.
+    """
+    details: list[str] = []
+    if restrictions.avoid_allergens:
+        allergen_names = ", ".join(
+            sorted(code.value.replace("_", " ").lower() for code in restrictions.avoid_allergens)
+        )
+        details.append(f"avoid {allergen_names}")
+    if restrictions.modes:
+        mode_names = ", ".join(
+            sorted(mode.value.replace("_", " ").lower() for mode in restrictions.modes)
+        )
+        details.append(f"match {mode_names}")
+    if restrictions.prefer_low_sugar:
+        details.append("prefer lower-sugar options")
+    if not details:
+        return (
+            "Tell me any allergies or dietary needs, and I'll filter the menu "
+            "before suggesting items."
+        )
+    return (
+        "Got it - I'll use this for the current session: "
+        f"{'; '.join(details)}. I'll filter the menu before suggesting items, "
+        "and unknown allergen data will be treated as unsafe."
+    )
+
 def _chunk_text(text: str, chunk_size: int = 24) -> list[str]:
     """Split immediate fallback text into simple streaming chunks.
 
@@ -991,36 +1157,366 @@ def _chunk_text(text: str, chunk_size: int = 24) -> list[str]:
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]
 
 
-def _format_menu_browse_response(items: list[MenuItemView]) -> str:
-    """Build a deterministic menu browse response from safe catalog items.
+@dataclass(frozen=True, slots=True)
+class _MenuSectionGroup:
+    """Grouped safe menu entries for one customer-facing menu section.
 
     Args:
-        items (list[MenuItemView]):
-            Safety-filtered menu items selected for broad menu browsing.
+        name (str):
+            Display name shown to the customer, such as `Coffees` or `Pizzas`.
+        root_name (str):
+            High-level source grouping, usually `Beverages`, `Food`, or `Menu`.
+        entries (tuple[MenuBrowseItem, ...]):
+            Safety-filtered browse entries that belong to the section.
+
+    Returns:
+        None:
+            Dataclass instances are internal value objects used for formatting.
+    """
+
+    name: str
+    root_name: str
+    entries: tuple[MenuBrowseItem, ...]
+
+
+def _format_menu_sections_response(
+    entries: list[MenuBrowseItem],
+    restrictions: CustomerRestrictions,
+) -> str:
+    """Build a restriction-aware menu overview grouped by section.
+
+    Args:
+        entries (list[MenuBrowseItem]):
+            Safety-filtered browse entries used to derive available sections.
+        restrictions (CustomerRestrictions):
+            Active customer restrictions used to filter the menu before any
+            section names or item counts are shown.
 
     Returns:
         str:
-            Customer-facing list built only from item names that passed the
-            deterministic safety filter.
+            Customer-facing section overview with item counts and a prompt to
+            choose a section for the next turn. When restrictions are active,
+            the copy explicitly says the list is filtered.
     """
-    if not items:
+    groups = _group_menu_sections(entries)
+    if not groups:
         return (
             "I can't confirm a safe menu option from the available menu data. "
             "Please check with cafe staff before ordering."
         )
-    item_lines = [f"- {item.name}" for item in items]
-    return "\n".join(
+
+    restriction_note = _restriction_filter_note(restrictions)
+    lines = [
+        "Absolutely - here are the menu sections I can walk you through:",
+    ]
+    if restriction_note:
+        lines.append(restriction_note)
+    lines.append("")
+    current_root = ""
+    for group in groups:
+        if group.root_name != current_root:
+            if current_root:
+                lines.append("")
+            lines.append(f"{group.root_name}:")
+            current_root = group.root_name
+        item_word = "item" if len(group.entries) == 1 else "items"
+        lines.append(f"- {group.name} ({len(group.entries)} {item_word})")
+    lines.extend(
         [
-            "Here are menu items I can currently confirm from the catalog:",
+            "",
+            "Tell me a section, like 'coffees' or 'pizzas', and I'll show those items.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _format_menu_section_items_response(
+    group: _MenuSectionGroup,
+    restrictions: CustomerRestrictions,
+) -> str:
+    """Build a restriction-aware item list for one selected menu section.
+
+    Args:
+        group (_MenuSectionGroup):
+            Matched section containing only safety-filtered menu entries.
+        restrictions (CustomerRestrictions):
+            Active customer restrictions used to filter item names before they
+            are shown in the selected section.
+
+    Returns:
+        str:
+            Customer-facing item list for the selected section. When
+            restrictions are active, the copy explicitly says unsafe or unknown
+            items have been filtered out.
+    """
+    item_lines = [f"- {entry.item.name}" for entry in group.entries]
+    restriction_note = _restriction_filter_note(restrictions)
+    lines = [f"Of course - here's the {group.name} section:"]
+    if restriction_note:
+        lines.append(restriction_note)
+    lines.extend(
+        [
             "",
             *item_lines,
             "",
-            (
-                "Ask for a category like lattes, teas, pastries, or sandwiches "
-                "if you want a narrower list."
-            ),
+            "Want me to narrow that down by hot, iced, low sugar, or dietary needs?",
         ]
     )
+    return "\n".join(lines)
+
+
+def _restriction_filter_note(restrictions: CustomerRestrictions) -> str:
+    """Describe active hard restrictions applied to a menu browse response.
+
+    Args:
+        restrictions (CustomerRestrictions):
+            Customer restrictions currently applied by the deterministic safety
+            filter before menu sections or item names are formatted.
+
+    Returns:
+        str:
+            Empty string when no hard restrictions are active; otherwise a short
+            customer-facing sentence that explains the displayed menu is already
+            filtered and unknown allergen data is treated as unsafe.
+    """
+    details: list[str] = []
+    if restrictions.avoid_allergens:
+        allergen_names = ", ".join(
+            sorted(code.value.replace("_", " ").lower() for code in restrictions.avoid_allergens)
+        )
+        details.append(f"avoiding {allergen_names}")
+    if restrictions.modes:
+        mode_names = ", ".join(
+            sorted(mode.value.replace("_", " ").lower() for mode in restrictions.modes)
+        )
+        details.append(f"matching {mode_names}")
+    if not details:
+        return ""
+    return (
+        "I filtered this list for "
+        f"{'; '.join(details)}. Items with unknown allergen data are not shown."
+    )
+
+def _group_menu_sections(entries: list[MenuBrowseItem]) -> list[_MenuSectionGroup]:
+    """Group safe browse entries into customer-facing menu sections.
+
+    Args:
+        entries (list[MenuBrowseItem]):
+            Safety-filtered entries with source category metadata.
+
+    Returns:
+        list[_MenuSectionGroup]:
+            Ordered section groups preserving catalog order.
+    """
+    grouped: dict[str, tuple[str, str, list[MenuBrowseItem]]] = {}
+    for entry in entries:
+        root_name, section_name = _section_names_for_entry(entry)
+        key = _section_key(section_name)
+        if key not in grouped:
+            grouped[key] = (section_name, root_name, [])
+        grouped[key][2].append(entry)
+    return [
+        _MenuSectionGroup(name=name, root_name=root_name, entries=tuple(group_entries))
+        for name, root_name, group_entries in grouped.values()
+    ]
+
+
+def _match_menu_section(
+    entries: list[MenuBrowseItem],
+    message: str,
+) -> _MenuSectionGroup | None:
+    """Match customer text to one available menu section.
+
+    Args:
+        entries (list[MenuBrowseItem]):
+            Safety-filtered browse entries used to derive matchable sections.
+        message (str):
+            Raw customer message from the active turn.
+
+    Returns:
+        _MenuSectionGroup | None:
+            Best matching section when the text clearly names one; otherwise None.
+    """
+    query_tokens = _section_tokens(message) - _SECTION_FILLER_TOKENS
+    if not query_tokens:
+        return None
+
+    best_group: _MenuSectionGroup | None = None
+    best_score = 0
+    for group in _group_menu_sections(entries):
+        aliases = [_section_tokens(group.name)]
+        aliases.extend(_section_tokens(entry.category_name) for entry in group.entries)
+        aliases.extend(_section_tokens(entry.category_path) for entry in group.entries)
+        for alias_tokens in aliases:
+            if not alias_tokens:
+                continue
+            overlap = len(query_tokens & alias_tokens)
+            if overlap == 0:
+                continue
+            exact = query_tokens == alias_tokens
+            subset = query_tokens.issubset(alias_tokens) or alias_tokens.issubset(query_tokens)
+            if not exact and not subset:
+                continue
+            score = (100 if exact else 0) + (50 if subset else 0) + overlap * 10 + len(alias_tokens)
+            if score > best_score:
+                best_score = score
+                best_group = group
+    return best_group
+
+
+def _section_names_for_entry(entry: MenuBrowseItem) -> tuple[str, str]:
+    """Choose display root and section names from a source category path.
+
+    Args:
+        entry (MenuBrowseItem):
+            Browse entry with category metadata from catalog or legacy tables.
+
+    Returns:
+        tuple[str, str]:
+            `(root_name, section_name)` suitable for customer-facing grouping.
+    """
+    parts = [part.strip() for part in entry.category_path.split(">") if part.strip()]
+    if not parts:
+        return "Menu", entry.category_name or "Other"
+    root_name = parts[0] if len(parts) > 1 else "Menu"
+    meaningful_parts = parts[1:] if len(parts) > 1 else parts
+    section_name = meaningful_parts[0] if meaningful_parts else entry.category_name or "Other"
+    return root_name, section_name
+
+
+def _section_key(section_name: str) -> str:
+    """Normalize a display section name into a stable grouping key.
+
+    Args:
+        section_name (str):
+            Customer-facing section name.
+
+    Returns:
+        str:
+            Stable lowercase key built from singularized tokens.
+    """
+    return " ".join(sorted(_section_tokens(section_name)))
+
+
+def _section_tokens(text: str) -> set[str]:
+    """Tokenize and lightly singularize section matching text.
+
+    Args:
+        text (str):
+            Raw section, category, path, or customer text.
+
+    Returns:
+        set[str]:
+            Normalized tokens used for deterministic section matching.
+    """
+    tokens: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", text.lower()):
+        if len(token) > 4 and token.endswith("ies"):
+            token = f"{token[:-3]}y"
+        elif len(token) > 4 and token.endswith(("ches", "shes", "sses", "xes", "zes")):
+            token = token[:-2]
+        elif len(token) > 3 and token.endswith("s"):
+            token = token[:-1]
+        tokens.add(token)
+    return tokens
+
+
+def _might_be_menu_section_request(message: str) -> bool:
+    """Return whether a message is likely asking to open a menu section.
+
+    Args:
+        message (str):
+            Raw customer message from the active turn.
+
+    Returns:
+        bool:
+            True for explicit section/category wording, natural browse
+            questions such as `what sandwiches do you have`, restriction-aware
+            browse requests such as `I am allergic to dairy, show me coffees`,
+            or short section-like replies such as `coffees` or `pizzas`.
+    """
+    tokens = _section_tokens(message)
+    if not tokens:
+        return False
+    if tokens & {"section", "category", "categorie"}:
+        return True
+    smalltalk_tokens = {"hi", "hello", "hey", "thank", "thanks", "bye"}
+    if tokens & smalltalk_tokens:
+        return False
+    recommendation_tokens = {"get", "order", "recommend", "should", "suggest", "try"}
+    if tokens & recommendation_tokens:
+        return False
+    browse_tokens = {
+        "available",
+        "do",
+        "have",
+        "list",
+        "see",
+        "show",
+        "what",
+        "which",
+    }
+    if tokens & browse_tokens:
+        return True
+    safety_tokens = {
+        "allergic",
+        "allergy",
+        "avoid",
+        "avoiding",
+        "dairy",
+        "egg",
+        "gluten",
+        "peanut",
+        "soy",
+        "vegan",
+        "vegetarian",
+    }
+    if tokens & safety_tokens:
+        return False
+    return 0 < len(tokens - _SECTION_FILLER_TOKENS) <= 2
+
+
+_SECTION_FILLER_TOKENS = {
+    "a",
+    "about",
+    "allergic",
+    "allergy",
+    "am",
+    "and",
+    "are",
+    "available",
+    "avoid",
+    "avoiding",
+    "can",
+    "could",
+    "do",
+    "does",
+    "for",
+    "give",
+    "has",
+    "have",
+    "i",
+    "in",
+    "is",
+    "item",
+    "list",
+    "me",
+    "of",
+    "option",
+    "please",
+    "see",
+    "show",
+    "the",
+    "there",
+    "to",
+    "today",
+    "want",
+    "what",
+    "which",
+    "with",
+    "yes",
+    "you",
+}
 
 
 def _is_broad_menu_request(message: str) -> bool:

@@ -4,7 +4,7 @@ Every user message, profile payload, provider credential, and retrieved document
 considered untrusted operational data. This module provides conservative helpers
 used before payloads are written to audit rows, trace spans, or Python logging.
 It intentionally redacts more than the minimum needed so phone numbers, health
-facts, bearer tokens, cookies, OTP details, and provider keys are not persisted in
+facts, bearer tokens, cookies, passwords, and provider keys are not persisted in
 raw form.
 """
 
@@ -28,7 +28,7 @@ _COOKIE_PATTERN = re.compile(
 )
 _KEY_VALUE_SECRET_PATTERN = re.compile(
     r"\b(?P<key>[a-z0-9_-]*(?:api[_-]?key|secret|token|password|"
-    r"otp[_-]?code|challenge[_-]?id)[a-z0-9_-]*)\b"
+    r"auth[_-]?token)[a-z0-9_-]*)\b"
     r"\s*[:=]\s*['\"]?[^,'\"\s}\]]+",
     re.IGNORECASE,
 )
@@ -48,10 +48,10 @@ _IP_PATTERN = re.compile(
 _SENSITIVE_KEYS = {
     "allergies",
     "api_key",
+    "auth_token",
     "authorization",
     "avoid_allergens",
     "bearer",
-    "challenge_id",
     "client_ip",
     "code",
     "cookie",
@@ -60,18 +60,13 @@ _SENSITIVE_KEYS = {
     "email",
     "health",
     "identity_device_token_hash_secret",
-    "identity_otp_hash_secret",
-    "identity_phone_hash_secret",
     "ip",
     "langfuse_secret_key",
     "llm_api_key",
     "message",
     "openai_api_key",
-    "otp",
-    "otp_code",
     "password",
     "phone",
-    "phone_hash",
     "phone_number",
     "qdrant_api_key",
     "rate_limit_hash_secret",

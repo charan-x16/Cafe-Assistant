@@ -43,7 +43,8 @@ _MENU_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _SAFETY_PATTERN = re.compile(
-    r"\b(allerg|peanut|tree nut|dairy|gluten|soy|egg|vegan|vegetarian|gluten[- ]?free)\b",
+    r"\b(allerg\w*|peanuts?|tree\s+nuts?|dairy|gluten|soy|eggs?|vegan|"
+    r"vegetarian|gluten[- ]?free)\b",
     re.IGNORECASE,
 )
 _SMALLTALK_PATTERN = re.compile(r"\b(hi|hello|hey|thanks|thank you)\b", re.IGNORECASE)

@@ -42,7 +42,7 @@ Implemented phases:
 | 1 | Deterministic dietary/allergen safety filter | Implemented |
 | 2 | Exact, fuzzy, vector, and hybrid menu retrieval | Implemented |
 | 3 | Streaming chat agent with explicit state machine | Implemented |
-| 4 | QR tenant context, device identity, OTP consent, durable profile memory | Implemented |
+| 4 | QR tenant context, account login, consent-gated durable profile memory | Implemented |
 | 5 | Tenant scoping, rate limiting, injection defenses, audit, redaction | Implemented |
 | 6 | Tracing, metrics, eval hard gates, incident replay, CI | Implemented |
 | 7 | Version registry, deploy artifacts, load/chaos tests, runbook | Implemented |
@@ -62,11 +62,11 @@ before the LLM composer sees an item.
 
 ```mermaid
 flowchart TD
-    Client["Browser / cafe table client"] -->|"POST /chat, consent, profile, health"| API["FastAPI application"]
+    Client["Browser / cafe table client"] -->|"POST /chat, login, profile, consent"| API["FastAPI application"]
     QR["QR payload<br/>cafe_id / location_id / table_id"] --> API
 
     API --> Deps["API dependencies<br/>tenant context, request id, rate limit"]
-    Deps --> Redis["Redis<br/>session turns, OTP challenges, rate limits"]
+    Deps --> Redis["Redis<br/>session turns and rate limits"]
     Deps --> Agent["Chat agent state machine<br/>CLASSIFIED -> RETRIEVING -> FILTERING -> RECOMMENDING -> COMPOSING"]
 
     Agent --> Router["Router<br/>rules + cheap model classification"]
@@ -92,7 +92,7 @@ flowchart TD
     Composer --> ChatProvider["Chat provider<br/>OpenAI or configured fallback"]
     ChatProvider --> Client
 
-    API --> Identity["Identity and consent routes<br/>OTP upgrade, profile view/delete"]
+    API --> Identity["Identity and consent routes<br/>account login, health consent, profile view/delete"]
     Identity --> SQL
     Identity --> Redis
 
@@ -116,8 +116,7 @@ How to read the diagram:
   chunks, allergen/dietary assertions, profiles, consents, and audit events.
 - **Qdrant is only an index.** It stores vectors plus `tenant_id`, `source_kind`,
   and `source_id`; the app reloads real rows from SQL before using content.
-- **Redis is operational state.** It stores short-lived session turns, OTP
-  challenges, and rate-limit counters.
+- **Redis is operational state.** It stores short-lived session turns and rate-limit counters.
 - **The safety filter is the hard gate.** Retrieval, exact lookup, and fallback
   paths return only `MenuItemView` records that passed deterministic filtering.
 - **The LLM sees safe items only.** It may explain or phrase recommendations,
@@ -135,7 +134,7 @@ How to read the diagram:
 | `src/cafe_assistant/gateway/model_gateway.py` | Mockable embedding and chat provider abstractions |
 | `src/cafe_assistant/agent/` | Router, typed tools, custom FSM, composer, prompts |
 | `src/cafe_assistant/memory/` | Redis session memory, durable profile merge, write gate |
-| `src/cafe_assistant/identity/` | QR tenant context, device token, OTP upgrade flow |
+| `src/cafe_assistant/identity/` | QR tenant context, password accounts, auth tokens, consent helpers |
 | `src/cafe_assistant/security/` | Rate limiting, prompt-injection neutralization, audit, redaction |
 | `src/cafe_assistant/observability/` | Tracing, metrics, incident replay |
 | `evals/` | Safety and quality evaluation datasets and runners |
@@ -365,9 +364,8 @@ The app also reads `.env` locally.
 | `CHAT_RETRIES` | `1` | Retry count for retryable provider failures |
 | `AGENT_DEADLINE_SECONDS` | `12.0` | Per-request agent deadline |
 | `AGENT_MAX_TOOL_CALLS` | `4` | Tool-call budget |
-| `IDENTITY_PHONE_HASH_SECRET` | local secret | Salt/secret for phone hashing |
-| `DEVICE_TOKEN_BYTES` | `32` | Opaque browser token size |
-| `OTP_CODE_TTL_SECONDS` | `300` | OTP challenge TTL |
+| `IDENTITY_DEVICE_TOKEN_HASH_SECRET` | local secret | HMAC secret for account auth-token hashes |
+| `DEVICE_TOKEN_BYTES` | `32` | Opaque auth token size |
 | `RATE_LIMIT_SESSION_REQUESTS` | `60` | Session request limit |
 | `RATE_LIMIT_SESSION_WINDOW_SECONDS` | `60` | Session rate-limit window |
 | `RATE_LIMIT_IP_REQUESTS` | `120` | IP request limit |
@@ -412,7 +410,7 @@ Core schema:
 - `customer_profile`
 - `episodic_events`
 - `consents`
-- `device_tokens`
+- `customer_device_tokens` (opaque account auth tokens)
 - `audit_events`
 
 Important menu columns:
@@ -440,10 +438,11 @@ Migration chain:
 | --- | --- |
 | `20260616_0001_initial_schema.py` | Initial menu schema and pgvector extension |
 | `20260617_0002_menu_item_embeddings.py` | Menu item embedding column |
-| `20260618_0003_identity_memory.py` | Customer, profile, consent, episodic memory, device token tables |
+| `20260618_0003_identity_memory.py` | Customer, profile, consent, episodic memory, token tables |
 | `20260618_0004_security_audit.py` | Append-only audit event table |
 | `20260619_0005_production_catalog.py` | Source docs, catalog, variants, policies, modifiers |
 | `20260619_0006_sentence_transformer_embeddings.py` | 384-dimensional BGE embedding compatibility |
+| `20260624_0008_account_login.py` | Tenant-scoped username/password account fields |
 
 Run migrations:
 
@@ -550,7 +549,6 @@ Request body:
 {
   "session_id": "demo-session",
   "tenant_id": 1,
-  "device_token": null,
   "message": "I am allergic to peanuts. What pastry can I have?"
 }
 ```
@@ -580,14 +578,15 @@ Serves `static/chat.html`, a minimal vanilla JavaScript chat client.
 ### Identity and Consent
 
 ```http
-POST /identity/otp/start
-POST /identity/otp/confirm
+POST /identity/register
+POST /identity/login
+POST /identity/logout
+POST /identity/consent/health
 GET /identity/profile
 DELETE /identity/profile
 ```
 
-The OTP flow upgrades an anonymous session to a remembered profile only after
-explicit customer consent. Profile read and deletion are tenant scoped.
+Customers can chat anonymously, then register or log in with a tenant-scoped username and password. Preferences may be remembered under the account; health and dietary facts are copied to durable memory only after explicit `/identity/consent/health` consent. Profile read and deletion are tenant scoped.
 
 ### Observability
 
@@ -638,8 +637,8 @@ The composer receives only `safe_items`. It never receives the raw menu.
 
 Identity degrades gracefully:
 
-1. Device token hit: recognized customer profile is loaded.
-2. Device token miss: request continues as an anonymous session.
+1. Account auth-token hit: recognized customer profile is loaded.
+2. Auth-token miss: request continues as an anonymous session.
 3. Redis/session unavailable: request continues as an anonymous session.
 
 Tenant context is stamped from either:
@@ -654,7 +653,7 @@ Durable memory rules:
 - UI preferences, such as milk preference, may be auto-written for recognized
   customers.
 - Dietary or health facts, such as allergies or diabetic mentions, require
-  explicit OTP consent before durable persistence.
+  explicit health-data consent before durable persistence.
 - Current message instructions override stored memory for the active turn.
 - Customer profiles are tenant scoped. Cross-tenant reads are denied by design.
 
@@ -669,8 +668,7 @@ Security controls:
 - User text and menu text are treated as untrusted.
 - Prompt-injection-like phrases are neutralized before model/provider calls.
 - System instructions and retrieved data are kept separated.
-- Logs and audit payloads redact phone numbers, health terms, auth headers,
-  cookies, OTP details, provider keys, tokens, and secrets.
+- Logs and audit payloads redact health terms, auth headers, cookies, provider keys, tokens, and secrets.
 - Significant actions append redacted rows to `audit_events`.
 - App code provides no update/delete path for audit events.
 
@@ -848,8 +846,6 @@ export POSTGRES_PASSWORD=replace-me
 export QDRANT_URL=https://your-qdrant-cluster
 export QDRANT_API_KEY=replace-me
 export LLM_API_KEY=replace-me
-export IDENTITY_PHONE_HASH_SECRET=replace-me
-export IDENTITY_OTP_HASH_SECRET=replace-me
 export IDENTITY_DEVICE_TOKEN_HASH_SECRET=replace-me
 export RATE_LIMIT_HASH_SECRET=replace-me
 export OBSERVABILITY_ADMIN_TOKEN=replace-me

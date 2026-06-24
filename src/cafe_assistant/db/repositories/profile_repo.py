@@ -1,9 +1,9 @@
 """Tenant-scoped repositories for customer profiles and episodic memory.
 
 This module is the database boundary for durable customer memory. Every public
-function receives a tenant ID and customer ID or tenant-scoped phone hash, and
-all customer lookups verify tenant ownership before profile, preference,
-dietary-fact, event, or deletion operations occur.
+function receives a tenant ID and customer ID, and all customer lookups verify
+tenant ownership before profile, preference, dietary-fact, event, or deletion
+operations occur.
 """
 
 from __future__ import annotations
@@ -43,44 +43,6 @@ class StoredProfile:
     dietary_facts: dict[str, object]
     consent_at: datetime | None
     recent_events: list[EpisodicEvent]
-
-
-async def get_or_create_customer_by_phone(
-    session: AsyncSession,
-    *,
-    tenant_id: int,
-    phone_hash: str,
-) -> Customer:
-    """Load or create a customer profile by tenant-scoped phone hash.
-
-    Args:
-        session (AsyncSession):
-            Async database session used for customer/profile operations.
-        tenant_id (int):
-            Tenant that owns the customer identity.
-        phone_hash (str):
-            HMAC hash of the normalized phone number.
-
-    Returns:
-        Customer:
-            Existing or newly-created customer with an attached profile row.
-    """
-    customer = await session.scalar(
-        select(Customer)
-        .where(Customer.tenant_id == tenant_id, Customer.phone_hash == phone_hash)
-        .options(selectinload(Customer.profile))
-    )
-    if customer is None:
-        customer = Customer(tenant_id=tenant_id, phone_hash=phone_hash)
-        customer.profile = CustomerProfile(preferences={}, dietary_facts={})
-        session.add(customer)
-        await session.flush()
-        return customer
-
-    if customer.profile is None:
-        customer.profile = CustomerProfile(preferences={}, dietary_facts={})
-        await session.flush()
-    return customer
 
 
 async def get_customer(

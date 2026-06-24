@@ -4,6 +4,8 @@ Contains typed helpers used by the cafe assistant backend runtime.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -33,6 +35,143 @@ from cafe_assistant.domain.catalog_safety import (
 )
 from cafe_assistant.domain.dietary import AllergenCode, DietaryMode, MenuItemView
 
+
+@dataclass(frozen=True, slots=True)
+class MenuBrowseItem:
+    """Safety-filterable menu item with its catalog or legacy section metadata.
+
+    Args:
+        item (MenuItemView):
+            Menu item view consumed by the deterministic safety filter.
+        category_name (str):
+            Human-readable leaf category name from the source menu.
+        category_path (str):
+            Hierarchical category path such as `Beverages > Coffees`.
+
+    Returns:
+        None:
+            Dataclass instances are value objects returned by repository helpers.
+    """
+
+    item: MenuItemView
+    category_name: str
+    category_path: str
+
+async def load_menu_browse_items_for_tenant(
+    session: AsyncSession,
+    tenant_id: int,
+) -> list[MenuBrowseItem]:
+    """Load ordered menu browse entries with section metadata for one tenant.
+
+    The helper prefers the imported production catalog and falls back to the
+    legacy menu table used by tests. It does not decide safety itself; callers
+    must still run the returned `MenuItemView` objects through the deterministic
+    filter before showing names to a customer.
+
+    Args:
+        session (AsyncSession):
+            Async SQLAlchemy session used for tenant-scoped database reads.
+        tenant_id (int):
+            Tenant identifier used to scope catalog or legacy menu rows.
+
+    Returns:
+        list[MenuBrowseItem]:
+            Ordered menu entries with their source category metadata.
+    """
+    catalog_entries = await _load_published_catalog_browse_items(session, tenant_id)
+    if catalog_entries:
+        return catalog_entries
+    return await _load_legacy_menu_browse_items(session, tenant_id)
+
+
+async def _load_published_catalog_browse_items(
+    session: AsyncSession,
+    tenant_id: int,
+) -> list[MenuBrowseItem]:
+    """Load published catalog variants with category metadata for browsing.
+
+    Args:
+        session (AsyncSession):
+            Async SQLAlchemy session used for tenant-scoped catalog reads.
+        tenant_id (int):
+            Tenant identifier used to scope the published catalog.
+
+    Returns:
+        list[MenuBrowseItem]:
+            Catalog variant views paired with category names and paths.
+    """
+    statement = (
+        select(CatalogItemVariant)
+        .join(CatalogItem)
+        .join(MenuVersion)
+        .join(Menu)
+        .where(Menu.tenant_id == tenant_id)
+        .where(MenuVersion.status == "published")
+        .where(CatalogItem.is_available.is_(True))
+        .where(CatalogItemVariant.is_available.is_(True))
+        .options(
+            selectinload(CatalogItemVariant.nutrition),
+            selectinload(CatalogItemVariant.catalog_item).selectinload(CatalogItem.category),
+            selectinload(CatalogItemVariant.catalog_item)
+            .selectinload(CatalogItem.allergen_assertions)
+            .selectinload(CatalogItemAllergenAssertion.allergen),
+            selectinload(CatalogItemVariant.catalog_item)
+            .selectinload(CatalogItem.dietary_assertions)
+            .selectinload(CatalogItemDietaryAssertion.dietary_tag),
+        )
+        .order_by(CatalogItem.sort_order, CatalogItemVariant.sort_order, CatalogItemVariant.id)
+    )
+    result = await session.scalars(statement)
+    entries: list[MenuBrowseItem] = []
+    for variant in result.unique():
+        category = variant.catalog_item.category
+        category_name = category.name if category is not None else "Other"
+        category_path = category.path if category is not None else category_name
+        entries.append(
+            MenuBrowseItem(
+                item=_catalog_variant_to_menu_item_view(variant),
+                category_name=category_name,
+                category_path=category_path,
+            )
+        )
+    return entries
+
+
+async def _load_legacy_menu_browse_items(
+    session: AsyncSession,
+    tenant_id: int,
+) -> list[MenuBrowseItem]:
+    """Load legacy menu rows with category metadata for browsing.
+
+    Args:
+        session (AsyncSession):
+            Async SQLAlchemy session used for tenant-scoped legacy menu reads.
+        tenant_id (int):
+            Tenant identifier used to scope legacy menu rows.
+
+    Returns:
+        list[MenuBrowseItem]:
+            Legacy menu item views paired with their flat category names.
+    """
+    statement = (
+        select(MenuItem)
+        .where(MenuItem.tenant_id == tenant_id)
+        .where(MenuItem.is_available.is_(True))
+        .options(
+            selectinload(MenuItem.ingredients).selectinload(Ingredient.allergens),
+            selectinload(MenuItem.dietary_tags),
+        )
+        .order_by(MenuItem.category, MenuItem.id)
+    )
+    result = await session.scalars(statement)
+    return [
+        MenuBrowseItem(
+            item=_to_menu_item_view(item),
+            category_name=item.category,
+            category_path=item.category,
+        )
+        for item in result.unique()
+    ]
 
 async def load_menu_item_views_for_tenant(
     session: AsyncSession,

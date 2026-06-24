@@ -51,16 +51,9 @@ class Settings(BaseSettings):
     chat_retries: int = 1
     agent_deadline_seconds: float = 60.0
     agent_max_tool_calls: int = 4
-    identity_phone_hash_secret: str = "local-dev-phone-hash-secret"
-    identity_otp_hash_secret: str = "local-dev-otp-hash-secret"
     identity_device_token_hash_secret: str = "local-dev-device-token-hash-secret"
     device_token_bytes: int = 32
     device_token_ttl_seconds: int = 60 * 60 * 24 * 90
-    otp_code_ttl_seconds: int = 300
-    otp_max_attempts: int = 5
-    otp_store_provider: str = "memory"
-    sms_provider: str = "noop"
-    otp_allow_noop_sms_sender: bool = True
     rate_limit_session_requests: int = 60
     rate_limit_session_window_seconds: int = 60
     rate_limit_ip_requests: int = 120

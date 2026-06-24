@@ -26,7 +26,7 @@ class DurableEvent:
 
     Attributes:
         type (str):
-            Event category, such as `preference_saved` or `otp_upgrade`.
+            Event category, such as `preference_saved` or `health_consent_granted`.
         payload (dict[str, object]):
             Structured event metadata. Sensitive values should already be minimized.
         created_at (datetime):

@@ -1,8 +1,8 @@
 """Opaque tenant-scoped device-token issuing, verification, and revocation.
 
-Device tokens are browser-held credentials created only after a customer completes
-an OTP consent upgrade. The raw token is returned once to the client; the server
-stores only an HMAC hash scoped to a tenant/customer pair. Verification always
+Device tokens are browser-held credentials created after a customer registers or
+logs in. The raw token is returned once to the client; the server stores only an
+HMAC hash scoped to a tenant/customer pair. Verification always
 joins through the customer row so a token created for one tenant cannot recognize
 a customer in another tenant.
 """
